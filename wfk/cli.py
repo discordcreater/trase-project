@@ -164,6 +164,7 @@ def cmd_cancel(a: argparse.Namespace, store: Store) -> int:
 
 
 def cmd_history(a: argparse.Namespace, store: Store) -> int:
+    store.load_workflow(a.id)  # an unknown id is an error (exit 4), not an empty history
     for e in store.events(a.id, a.kind):
         print(json.dumps(e.__dict__, sort_keys=True) if a.json else narrate(e))
     return 0

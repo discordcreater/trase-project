@@ -198,12 +198,16 @@ class Store:
         # batch in Postgres instead.
         self.conn = sqlite3.connect(path, isolation_level=None)  # explicit BEGIN/COMMIT only
         self.conn.row_factory = sqlite3.Row
+        # Refuse before touching: the version is read before any DDL runs, so a file written
+        # by a newer kernel is handed back exactly as it was found (IF NOT EXISTS would make
+        # today's DDL harmless, but not the day a v2 renames a table or adds a column).
+        found = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if found > SCHEMA_VERSION:
+            self.conn.close()
+            raise StoreError(f"{path}: schema version {found} is newer than this kernel's {SCHEMA_VERSION}")
         self.conn.executescript(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;" + SCHEMA
         )
-        found = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        if found > SCHEMA_VERSION:
-            raise StoreError(f"{path}: schema version {found} is newer than this kernel's {SCHEMA_VERSION}")
         if found < SCHEMA_VERSION:  # fresh file (0); migrations would run here in order
             self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
