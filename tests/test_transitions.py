@@ -162,3 +162,27 @@ def test_non_json_output_is_fatal_not_retried(make_engine, notifications):
     assert classify.state == "FAILED" and classify.attempt == 1
     assert engine.store.events(wf_id, "STEP_FAILED")[0].payload["reason"] == "fatal"
     assert "JSON" in classify.error
+
+
+def test_cancel_racing_start_is_reported_not_raised(db_path, notifications, clock):
+    """run() reads the row (PENDING, unowned) and then claims it. A cancel that lands in
+    between leaves a CANCELLED, unowned row that the claim still succeeds on. The engine
+    must report CANCELLED and release, not try to finish a workflow that already finished."""
+    from wfk.engine import Engine
+    from wfk.store import Store
+
+    class CancelBeforeClaim(Store):
+        def claim(self, wf_id, owner, take_over=False):
+            self.request_cancel(wf_id, "operator")
+            self.transition_workflow(wf_id, "PENDING", "CANCELLED", None, "cancelled before first run")
+            super().claim(wf_id, owner, take_over)
+
+    store = CancelBeforeClaim(db_path, clock=clock)
+    engine = Engine(store, registry(FileNotifier(notifications)), sleep=clock.sleep)
+    wf_id = engine.start(TRIAGE_V1, INPUT)
+    assert engine.run(wf_id) == "CANCELLED"
+    wf = store.load_workflow(wf_id)
+    assert wf.state == "CANCELLED" and wf.owner is None
+    assert all(s.attempt == 0 for s in store.load_steps(wf_id))
+    assert [e.type for e in store.events(wf_id)][-2:] == ["OWNER_CLAIMED", "OWNER_RELEASED"]
+    store.close()

@@ -142,6 +142,11 @@ class Engine:
 
     def _run_owned(self, wf_id: str, owner: str, spec: WorkflowSpec) -> str:
         wf = self.store.load_workflow(wf_id)  # re-read under our claim
+        if wf.state in WF_TERMINAL:
+            # A cancel landed between run()'s read and the claim: the row was PENDING and
+            # unowned, so the claim went through on a row that is already CANCELLED. There
+            # is nothing to run and nothing to finish; report it and let run() release.
+            return wf.state
         if wf.state == "PENDING":
             self.store.transition_workflow(wf_id, "PENDING", "RUNNING", owner, "started")
 
