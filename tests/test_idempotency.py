@@ -89,3 +89,19 @@ def test_done_effect_is_not_resent_on_resume(make_engine, notifications):
     assert engine2.run(wf_id, take_over=True) == "SUCCEEDED"
     assert sink.calls == 0
     assert engine2.store.load_step(wf_id, "notify").output == {"email": {"status": "sent", "key": key}}
+
+
+def test_file_notifier_honours_the_key_only_when_it_says_it_does(notifications):
+    """The demo receiver's flag is behaviour, not a label: an idempotent receiver keeps the
+    first body for a key, a non-idempotent one delivers every call (which is why the kernel
+    never resends to it on its own)."""
+    payload = {"to": "ap@example.com", "subject": "s", "body": "b"}
+    honours = FileNotifier(notifications, idempotent=True)
+    assert honours.send("k1", payload)["status"] == "sent"
+    assert honours.send("k1", payload)["status"] == "duplicate"
+    assert len(_lines(notifications)) == 1
+
+    relay = FileNotifier(notifications, idempotent=False)
+    assert relay.send("k2", payload)["status"] == "sent"
+    assert relay.send("k2", payload)["status"] == "sent"      # delivered twice
+    assert len(_lines(notifications)) == 3

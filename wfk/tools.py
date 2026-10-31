@@ -31,7 +31,12 @@ class FatalError(Exception):
 
 class Tool(Protocol):
     name: str
-    side_effect_free: bool  # True: no ledger needed, safe to re-run on retry
+    # side_effect_free: True means the tool has no external effect and may be re-run on
+    # retry or resume without the ledger. The kernel enforces nothing from it today:
+    # run_effect is opt-in, and a tool that has an effect and skips the ledger is simply
+    # re-run. The flag is a declaration for readers and for the scheduler in the README's
+    # Design A, which may re-dispatch such a step without consulting the effects table.
+    side_effect_free: bool
     # idempotent: True means the receivers of this tool's effects dedupe on the key the
     # kernel passes them, so an ambiguous (CLAIMED, not DONE) effect may be re-called
     # with the same key. It is a statement about the receiver, declared by the tool.
@@ -145,8 +150,11 @@ class FileNotifier:
 
     def send(self, key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         self.calls += 1
-        if key in self.sent_keys():
+        if self.idempotent and key in self.sent_keys():
             return {"status": "duplicate", "key": key}
+        # idempotent=False models a receiver that ignores the key (a bare SMTP relay): every
+        # call is a delivery, so a resend here would be the duplicate the ledger exists to
+        # prevent, and the kernel must never make that call on its own.
         row = {"key": key, "payload": payload}
         with open(self.path, "a") as f:
             f.write(json.dumps(row, sort_keys=True) + "\n")
