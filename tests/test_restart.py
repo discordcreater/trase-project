@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from wfk.spec import TRIAGE_V1
@@ -132,3 +134,83 @@ def test_backoff_wait_is_clamped_when_the_clock_steps_backwards(make_engine, not
     engine2 = make_engine(registry(FileNotifier(notifications)))
     assert engine2.run(wf_id, take_over=True) == "SUCCEEDED"
     assert clock.slept == [Engine.BACKOFF_CAP_S]          # 2 s, not 3600.05 s
+
+
+def test_interrupted_last_attempt_goes_to_the_failure_policy(make_engine, notifications):
+    """The edge the state machine grew during implementation (PENDING -> FAILED | SKIPPED):
+    the process dies inside classify's second and last attempt. Resume finds the step
+    RUNNING with no budget left, so it must fail it from PENDING without starting an
+    attempt it cannot afford, and must say the attempt was interrupted, not failed."""
+    from wfk.engine import consistency_diff
+    from wfk.tools import RetryableError
+
+    class DiesOnSecondCall:
+        name, side_effect_free, idempotent = "classify", True, True
+
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, ctx, inputs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RetryableError("classifier unavailable")
+            raise SimulatedCrash("killed inside classify's last attempt")
+
+    dying = DiesOnSecondCall()
+    engine1 = make_engine(registry(FileNotifier(notifications), classify=dying))
+    wf_id = engine1.start(TRIAGE_V1, INPUT)
+    with pytest.raises(SimulatedCrash):
+        engine1.run(wf_id)
+    row = engine1.store.load_step(wf_id, "classify")
+    assert row.state == "RUNNING" and row.attempt == row.max_attempts == 2
+
+    healthy = Counting(ClassifyTool())
+    engine2 = make_engine(registry(FileNotifier(notifications), classify=healthy))
+    assert engine2.run(wf_id, take_over=True) == "FAILED"
+
+    store = engine2.store
+    row = store.load_step(wf_id, "classify")
+    assert row.state == "FAILED" and row.attempt == 2 and healthy.calls == 0
+    assert "interrupted" in row.error and "classifier unavailable" in row.error  # both causes kept
+    failed = store.events(wf_id, "STEP_FAILED")[0].payload
+    assert failed["reason"] == "exhausted" and failed["attempt"] == 2
+    assert [e.payload["attempt"] for e in store.events(wf_id, "ATTEMPT_FAILED")] == [1]  # attempt 2 was not a failure
+    assert len(store.events(wf_id, "ATTEMPT_INTERRUPTED")) == 1
+    assert store.load_step(wf_id, "notify").state == "PENDING"
+    assert store.load_workflow(wf_id).owner is None
+    assert consistency_diff(store, wf_id) == []        # the reducer walks PENDING -> FAILED too
+    assert not os.path.exists(notifications)
+
+
+def test_crash_after_step_failed_finishes_the_workflow(make_engine, db_path, notifications, clock):
+    """Crash point between STEP_FAILED and the workflow's own FAILED commit: resume must
+    finish what the dead process started, without starting another attempt."""
+    from wfk.engine import Engine, consistency_diff
+    from wfk.faults import Flaky
+    from wfk.store import Store
+
+    class CrashAfterFailed(Store):
+        def transition_step(self, wf_id, name, frm, to, *args, **kw):
+            super().transition_step(wf_id, name, frm, to, *args, **kw)
+            if to == "FAILED":
+                raise SimulatedCrash(f"process died right after step {name} FAILED committed")
+
+    store1 = CrashAfterFailed(db_path, clock=clock)
+    engine1 = Engine(store1, registry(FileNotifier(notifications), classify=Flaky(ClassifyTool(), 99)),
+                     sleep=clock.sleep)
+    wf_id = engine1.start(TRIAGE_V1, INPUT)
+    with pytest.raises(SimulatedCrash):
+        engine1.run(wf_id)
+    assert store1.load_step(wf_id, "classify").state == "FAILED"
+    assert store1.load_workflow(wf_id).state == "RUNNING"
+    store1.close()
+
+    engine2 = make_engine()
+    assert engine2.run(wf_id, take_over=True) == "FAILED"
+    store = engine2.store
+    assert store.load_step(wf_id, "classify").attempt == 2
+    assert len(store.events(wf_id, "ATTEMPT_STARTED")) == 4          # ingest, extract, classify x2; nothing new
+    last_state = store.events(wf_id, "WORKFLOW_STATE")[-1].payload
+    assert last_state["to"] == "FAILED" and "classify" in last_state["reason"]
+    assert store.load_workflow(wf_id).owner is None
+    assert consistency_diff(store, wf_id) == []
