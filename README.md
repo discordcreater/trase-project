@@ -24,7 +24,7 @@ docs/DESIGN.md    the full design record (decisions, crash-point table, test pla
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # pytest only
-.venv/bin/python -m pytest                                             # 23 tests, < 1 s
+.venv/bin/python -m pytest                                             # 27 tests, < 1 s
 scripts/demo.sh                                                        # end-to-end demo in a temp dir
 
 python -m wfk start examples/doc.json --id w1          # create and run (db: ./wfk.db)
@@ -66,7 +66,8 @@ install: run it from the repository root.
 
 One mental model: **Engine decides, Store remembers, Tool does.** Nothing else holds state.
 
-- **Store** (`store.py`) owns a single SQLite file (WAL, `synchronous=FULL`) with four tables:
+- **Store** (`store.py`) owns a single SQLite file (WAL, `synchronous=FULL`, schema version stamped in
+  `PRAGMA user_version`; a file written by a newer kernel is refused) with four tables:
   `workflows`, `steps`, `effects` (the state the engine reads) and `events` (append-only; no
   UPDATE or DELETE statement for it exists in the module). Every state change is one
   `BEGIN IMMEDIATE` transaction that updates a row **and** appends the events that explain it, so
@@ -117,9 +118,11 @@ keeps the audit trail honest. Terminal states are absorbing.
    on disk and is what later steps read.
 3. **Per step**, in spec order: check the cancel flag; if attempts are exhausted apply the failure
    policy; wait until the persisted `next_run_at` (a restart during a backoff waits the remainder,
-   not zero and not the full delay); `PENDING → RUNNING` (`ATTEMPT_STARTED`, attempt += 1); call the
+   not zero and not the full delay; the wait is clamped to the backoff cap so a clock that stepped backwards
+   cannot stall the engine for hours), re-check the cancel flag if it waited; `PENDING → RUNNING` (`ATTEMPT_STARTED`, attempt += 1); call the
    tool outside any transaction; then one of:
-   - returned → `RUNNING → SUCCEEDED`, output persisted;
+   - returned a JSON object → `RUNNING → SUCCEEDED`, output persisted (a non-JSON output is a tool bug and
+     is treated as `FatalError`, not retried);
    - `FatalError` → `RUNNING → FAILED` (reason `fatal`), no more attempts;
    - any other exception with attempts left → `RUNNING → PENDING` with `RETRY_SCHEDULED`,
      `next_run_at = now + min(base · 2^(attempt−1), 2 s)`; otherwise `FAILED` (reason `exhausted`).
@@ -188,7 +191,7 @@ the crash between steps (`test_restart_resumes_without_rerunning`).
 
 ## What the tests prove
 
-23 tests, one temp SQLite file each, a fake clock so backoff takes no real time. Every crash is
+27 tests, one temp SQLite file each, a fake clock so backoff takes no real time. Every crash is
 injected at a boundary where it happens in production (inside the receiver call, right after a
 commit, during a sleep), never by a hook inside the kernel.
 
@@ -197,10 +200,10 @@ commit, during a sleep), never by a hook inside the kernel.
 | `test_retry.py` | exponential backoff `[0.05, 0.1]`, `next_run_at` persisted then cleared, earlier steps untouched by a later step's retries |
 | `test_failure_policy.py` | exhaustion fails the workflow and never starts later steps; `on_failure: skip` lets the workflow succeed with the step `SKIPPED` after 5 attempts |
 | `test_idempotency.py` | crash after the receiver accepted: one effect across two invocations (idempotent receiver); the same crash with a non-idempotent receiver fails the step with `ambiguous_effect` and leaves the row `CLAIMED`; a `DONE` row is returned without calling the receiver |
-| `test_restart.py` | crash between steps: new process re-runs nothing; the dead claim blocks a plain `run` and `--take-over` clears it; a crash during backoff waits only the remainder; a stalled engine that lost its claim cannot commit anything after a take-over |
+| `test_restart.py` | crash between steps: new process re-runs nothing; the dead claim blocks a plain `run` and `--take-over` clears it; a crash during backoff waits only the remainder; a clock that stepped back an hour costs at most one capped backoff; a stalled engine that lost its claim cannot commit anything after a take-over |
 | `test_replay.py` | the log reproduces every row after retry + crash + resume; a hand-edited row makes `replay` exit 1; a log that skips a state is rejected by the reducer |
-| `test_transitions.py` | illegal transitions write nothing; a stale owner cannot transition, claim/complete an effect, or append an event; cancel between attempts and before first run; `FatalError` fails without retry; input validation; `run` on a terminal workflow does not claim |
-| `test_cli.py` | every operator error is a message with an exit code; a JSON spec round-trips through `start` and `run` |
+| `test_transitions.py` | illegal transitions write nothing; a stale owner cannot transition, claim/complete an effect, or append an event; cancel between attempts, before first run, and during a backoff wait; `FatalError` fails without retry; a non-JSON tool output fails once, not N times; input validation; `run` on a terminal workflow does not claim |
+| `test_cli.py` | every operator error is a message with an exit code; a JSON spec round-trips through `start` and `run`; a database file from a newer schema version is refused |
 
 ## Design
 
@@ -299,6 +302,25 @@ never lost and never redone (`test_retry_then_success` checks ingest's attempt c
   that tombstones `payload_json` while keeping the event skeleton; `prev_hash` chaining for a
   tamper-evident log if a regulator requires it. Described, not built.
 
+## Production roadmap
+
+What I would build next, in order, and why that order:
+
+1. **Lease with a fencing token** (`owner, lease_until, lease_token`; every write's WHERE carries the
+   token). Removes the human from crash recovery, which is the only step in this design that needs one.
+   Everything else in Design A is a consequence of this.
+2. **Reconciler for stuck effects**: a periodic query for `CLAIMED` rows older than N minutes, surfaced to
+   operators with an `effects resolve <key> --done|--not-sent` verb. Today the kernel records the
+   ambiguity correctly but gives the operator no verb to close it.
+3. **Payload hash in the ledger** (see the comment in `Engine._run_effect`): a resend whose payload differs
+   from the claimed one is refused, so a receiver that dedupes by key can never silently keep a stale body.
+4. **Backoff on interruption and jitter**: once resume is automatic, an interrupted attempt must back off
+   like a failed one, and a fleet needs jitter so retries do not synchronise.
+5. **Postgres behind the same `Store` interface**, `events` partitioned by month, `tenant_id` on every table
+   and in the effect key. The schema does not change; the fence becomes `WHERE lease_token = ?`.
+6. **Observability off the event funnel** (`Store._append`): counters per event type, a span per attempt,
+   and a change feed; one instrumentation point because every state change already passes through it.
+
 ## Time log
 
 | Where | Time | Notes |
@@ -310,6 +332,7 @@ never lost and never redone (`test_retry_then_success` checks ingest's attempt c
 | README | ~0.5 h | |
 | Self-review pass (+6 tests) | ~1 h | Reproduced every README claim and raced two engines. Found the effects ledger was not owner-fenced (a stalled engine could overwrite the record of the one that took over; fixed with one `_fence` inside every workflow-scoped transaction and a race test); moved crash injection out of the engine into `faults.py`; operator errors became exit codes |
 | Final documentation pass | ~0.5 h | This README, demo narration, test map |
+| Review pass (+4 tests) | ~0.75 h | Read the kernel as an operator would run it for a year: a cancel during a backoff wait was not seen until after the next attempt (re-checked after the wait); a tool output that cannot be serialized was retried N times as if transient (now `FatalError`); a clock stepping backwards could stall a resume for hours (wait clamped to the backoff cap); schema version stamped in `user_version`. Comments at the non-obvious decisions (fence vs lease, effect-key stability, payload hash, poison-pill bound, jitter) |
 
 **Intentionally simplified / cut** (each would be a real feature, none earns its lines here):
 transactional outbox + dispatcher; lease TTL and stealing (needs the fencing token described in A);

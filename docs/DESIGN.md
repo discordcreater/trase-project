@@ -20,7 +20,7 @@ The brief asks for a minimal, production-minded engine that runs a four-step "do
 
 1. **Correctness under failure.** Every state change is durable before the next action; a crash at any instruction leaves the database in a state the engine can resume from; the notify effect is never performed twice when the kernel can prove it, and the kernel *says so* when it cannot.
 2. **Explainability.** One mental model: **Engine decides, Store remembers, Tool does.** Nothing else holds state.
-3. **Scope discipline.** Four tables, six modules, six CLI verbs, 23 tests in seven files. Everything else is a sentence in the README.
+3. **Scope discipline.** Four tables, six modules, six CLI verbs, 27 tests in seven files. Everything else is a sentence in the README.
 
 The hard problem is the window between an external side effect returning and the local commit that records it. No single-process design can close it. I sketched three shapes before choosing: (a) a transactional outbox with a dispatcher that owns all sends, (b) a dedupe-only sink with no kernel bookkeeping, (c) an effects ledger in the kernel with the receiver deduping on a kernel-minted key. The honest guarantee any of them can give is: *at-least-once invocation, exactly-once recording, exactly-once effect iff the receiver honours the idempotency key; when the kernel cannot tell whether the effect happened, it surfaces the ambiguity instead of guessing.* I chose (c) because it makes that ambiguity a first-class, queryable fact rather than hiding it inside a dispatcher (a) or a sink (b).
 
@@ -207,11 +207,13 @@ Engine.run(workflow_id, owner=uuid4()):
         while True:
             if store.cancel_requested(wf_id): return finish(CANCELLED)
             if row.attempt >= step.max_attempts: outcome = exhausted; break
-            wait_until(row.next_run_at)                            # in-process sleep; persisted so a restart honours it
+            waited = wait_until(row.next_run_at)                   # in-process sleep, clamped to the cap; persisted so a restart honours it
+            if waited and store.cancel_requested(wf_id): return finish(CANCELLED)   # a cancel that arrived during the backoff
             transition(row, RUNNING, ATTEMPT_STARTED, attempt+1)
             ctx = StepContext(wf_id, step.name, attempt, inputs=outputs_so_far, effects=store, tool=tool)
             try:
                 out = tool.run(ctx, inputs)                         # the only place a tool runs; outside any transaction
+                encode(out)                                         # not a JSON object -> FatalError (a bug, not a transient)
                 transition(row, SUCCEEDED, STEP_SUCCEEDED, output=out, error=None); outcome = ok; break
             except FatalError as e:    outcome = fatal(e); break
             except StoreError:         raise            # the kernel's own failure inside ctx.*, never retried as the tool's
@@ -307,7 +309,8 @@ C3 and C4 are indistinguishable from disk, which is exactly why the ledger recor
 - No in-memory state is needed to continue. `Engine.run` is a pure function of the database and the registry.
 - Resume entry point: `run X` (`start --id X` for an existing id is refused with "already exists", exit 4; `start` creates, `run` resumes).
 - Interrupted attempt handling (D8): a step found RUNNING at entry gets `ATTEMPT_INTERRUPTED` and goes back to PENDING with its attempt count intact; `next_run_at` is left as-is (NULL for an interrupted attempt, so it reruns immediately).
-- Backoff survives a restart because `next_run_at` is persisted.
+- Backoff survives a restart because `next_run_at` is persisted. The wait is clamped to `BACKOFF_CAP_S`: the deadline is wall-clock time written by a possibly different process, and a clock that stepped backwards must cost at most one maximum backoff, never hours.
+- Schema version: `PRAGMA user_version` is stamped at open; a file written by a newer kernel is refused (`StoreError`, exit 4) rather than misread.
 - Claim (D9): `store.claim()` is one `UPDATE ... WHERE id=? AND (owner IS NULL OR owner=?)`; rowcount 0 → `AlreadyOwned`, the CLI prints "workflow X is owned by <owner>; use --take-over if that process is dead". Every transition's UPDATE includes `AND owner=?`; rowcount 0 → `LostClaim`, rollback, the engine stops. Assumption, stated in README: one live engine process per database file; a dead owner is cleared by the operator. No TTL stealing, because stealing without a fencing token at commit would let a slow tool and a new owner both commit the same attempt.
 - Restart demonstration: `wfk start --crash-after classify` wraps the Store in `CrashAfterCommit`, which raises `SimulatedCrash` right after the post-classify commit (`os._exit(1)` in the CLI, like kill -9), then `wfk run X --take-over` resumes; `status` shows ingest/extract/classify untouched and notify SUCCEEDED with one notification line. Automated in `test_restart_resumes_without_rerunning`.
 
@@ -431,7 +434,7 @@ Target ~550 lines of source, ~250 of tests (actual: ~700 source including the CL
 
 ---
 
-## 10. Test plan (pytest, seven files, 23 tests, < 2 s, tmp SQLite per test)
+## 10. Test plan (pytest, seven files, 27 tests, < 2 s, tmp SQLite per test)
 
 Each `make_engine()` call opens a fresh `Store` on the same file: a new process on the same disk. Clock and sleep are injected so backoff tests do not wait.
 
@@ -440,10 +443,10 @@ Each `make_engine()` call opens a fresh `Store` on the same file: a new process 
 | `test_retry.py` | `test_retry_then_success` | extract attempt == 3, two `RETRY_SCHEDULED` with 0.05 s then 0.1 s, the persisted `next_run_at` honoured, ingest untouched |
 | `test_failure_policy.py` | `test_exhaustion_fails_workflow`, `test_skip_policy_lets_workflow_succeed` | classify `max_attempts=2` → FAILED `exhausted`, wf FAILED, notify never called, claim released; notify `skip` → SKIPPED after 5 calls, wf SUCCEEDED |
 | `test_idempotency.py` | `test_notify_effect_once_across_crash`, `test_ambiguous_non_idempotent_fails_safely`, `test_done_effect_is_not_resent_on_resume` | C3/C4 with `CrashingSink`: CLAIMED on disk, one line; resume → `EFFECT_AMBIGUOUS` resend, still one line, DONE, attempt 2. Non-idempotent sink → FAILED `ambiguous_effect`, sink called once, row left CLAIMED. C5: DONE on disk → stored result returned, sink never called |
-| `test_restart.py` | `test_restart_resumes_without_rerunning`, `test_claim_blocks_second_owner`, `test_restart_during_backoff_waits_the_remainder`, `test_fenced_out_engine_cannot_finish_the_effect` | `CrashAfterCommit("classify")`: counters 1/1/1/0 then 0/0/0/1, no `ATTEMPT_INTERRUPTED`; `AlreadyOwned` then `--take-over`; a crash mid-backoff waits the remainder (0.03 s of 0.05 s); engine A stalls inside the receiver, B takes over and finishes, A's writes are fenced out, B's record stands |
+| `test_restart.py` | `test_restart_resumes_without_rerunning`, `test_claim_blocks_second_owner`, `test_restart_during_backoff_waits_the_remainder`, `test_backoff_wait_is_clamped_when_the_clock_steps_backwards`, `test_fenced_out_engine_cannot_finish_the_effect` | `CrashAfterCommit("classify")`: counters 1/1/1/0 then 0/0/0/1, no `ATTEMPT_INTERRUPTED`; `AlreadyOwned` then `--take-over`; a crash mid-backoff waits the remainder (0.03 s of 0.05 s); a clock stepped back an hour waits the 2 s cap, not 3600 s; engine A stalls inside the receiver, B takes over and finishes, A's writes are fenced out, B's record stands |
 | `test_replay.py` | `test_replay_rebuild_equals_tables`, `test_replay_detects_tampered_table`, `test_replay_rejects_illegal_log` | the reducer reproduces every row after retry + crash + resume; a hand-edited row makes `replay` exit 1; a log that skips RUNNING raises `IllegalTransition` |
-| `test_transitions.py` | `test_illegal_transition_raises_and_writes_nothing`, `test_stale_owner_cannot_commit`, `test_stale_owner_cannot_write_ledger_or_events`, `test_cancel_between_attempts`, `test_cancel_before_first_run`, `test_fatal_error_fails_without_retry`, `test_start_rejects_bad_input_and_duplicate_id`, `test_run_on_terminal_workflow_does_not_claim` | the state machine and the owner fence (transitions, ledger, events); cooperative cancel; `FatalError` → one attempt; input validation before persisting; no claim noise on a finished workflow |
-| `test_cli.py` | `test_operator_errors_exit_cleanly`, `test_spec_file_round_trips_through_start_and_run` | duplicate id, unknown spec/tool, non-object input, malformed spec file → exit 4/5 with a message, never a traceback; `--spec file.json` works on `start` and on `run` |
+| `test_transitions.py` | `test_illegal_transition_raises_and_writes_nothing`, `test_stale_owner_cannot_commit`, `test_stale_owner_cannot_write_ledger_or_events`, `test_cancel_between_attempts`, `test_cancel_before_first_run`, `test_fatal_error_fails_without_retry`, `test_start_rejects_bad_input_and_duplicate_id`, `test_run_on_terminal_workflow_does_not_claim`, `test_cancel_during_backoff_is_honoured_before_the_next_attempt`, `test_non_json_output_is_fatal_not_retried` | the state machine and the owner fence (transitions, ledger, events); cooperative cancel, including a cancel that lands during a backoff sleep; `FatalError` → one attempt; a non-serializable output → `fatal` on attempt 1; input validation before persisting; no claim noise on a finished workflow |
+| `test_cli.py` | `test_operator_errors_exit_cleanly`, `test_spec_file_round_trips_through_start_and_run`, `test_newer_schema_is_refused` | duplicate id, unknown spec/tool, non-object input, malformed spec file → exit 4/5 with a message, never a traceback; `--spec file.json` works on `start` and on `run`; `PRAGMA user_version` newer than the kernel → exit 4 |
 
 The engine has no test hooks. Crashes are injected at the boundary where they happen: inside a receiver call (`CrashingSink`) or right after a commit (`CrashAfterCommit`, a `Store` subclass).
 
