@@ -1,0 +1,8 @@
+{
+  "document": {
+    "id": "doc-4471",
+    "mime": "text/plain",
+    "text": "Invoice #4471 from Northwind Traders\nPayment terms: net 30.\nTotal due: $1,250.00 for cloud storage, October.\nPlease remit to accounts@northwind.example."
+  },
+  "notify_to": "ap-team@example.com"
+}
