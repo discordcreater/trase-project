@@ -6,7 +6,7 @@ and the failure it prevents.** Never a tour of the code. Every number below is r
 or the test output; nothing is rounded up.
 
 Numbers to carry: 4 tables, 16 event types, 12 state edges (5 workflow + 7 step), 6 CLI verbs,
-7 exit codes, 27 tests in 7 files (~0.1 s), ~1,350 lines of Python incl. docstrings, stdlib only,
+7 exit codes, 31 tests in 7 files (~0.1 s), ~1,350 lines of Python incl. docstrings, stdlib only,
 16 events and 16 transactions per clean run, backoff 0.05 / 0.1 / 0.2 / 0.4 s capped at 2 s,
 key = sha256(workflow:step:effect), demo ~2 s.
 

@@ -2,7 +2,7 @@
 
 For: Ganesh, before the Trase follow-up. Written Oct 30, 2026 against the canonical code in
 `~/claude-code-ws/trase-project` (every quote below is verbatim from that repo, with the file and
-line numbers as of the Oct 31 review pass, commit `b51a529`; the drill code in §6 was built and tested in a scratch copy, never
+line numbers as of the Oct 31 evening pass, commit `080c8f0`; the drill code in §6 was built and tested in a scratch copy, never
 in the canonical repo).
 
 The follow-up (Adam Elconin, Oct 28 call and his email) is: *what were your decisions, how did you
@@ -29,7 +29,7 @@ that you own every line and every decision.
    number, and an ambiguous claim is recorded, then resolved by the tool's declared idempotency;
    (D9) a claim with an owner fence re-checked inside every write, instead of a TTL lease.
 4. **Numbers:** 7 modules, ~1,300 lines; 4 tables; 16 event types; 5 workflow edges, 7 step
-   edges; 6 CLI verbs; 7 exit codes; 27 tests in 7 files (<1 s); a clean run writes exactly 16 events.
+   edges; 6 CLI verbs; 7 exit codes; 31 tests in 7 files (<1 s); a clean run writes exactly 16 events.
 5. **Read the repo in 90 minutes, in this order** (the order §3 follows): `spec.py` (10 min) →
    `store.py` top half, schema and ALLOWED sets (15) → `store.py` bottom half, transitions and
    ledger (15) → `engine.py` `Engine.run`/`_run_owned`/`_run_step` (20) → `engine.py` `_run_effect`
@@ -176,7 +176,7 @@ def load_spec_json(path: str) -> WorkflowSpec:
   `TypeError`, a missing `"steps"` a `KeyError`; both become one `ValueError` the CLI maps to exit 5
   (`test_operator_errors_exit_cleanly`). `from None` hides the noisy chained traceback.
 
-### 3.2 `wfk/store.py` (461 lines): persistence, the only SQLite code
+### 3.2 `wfk/store.py` (465 lines): persistence, the only SQLite code
 
 Responsibility: the schema, the two state machines as data, and every write as one fenced
 transaction that also appends the events explaining it.
@@ -358,7 +358,7 @@ read-only views of a row with JSON columns already parsed (`input`, `output`, `r
 are dicts). `EventSpec = Tuple[str, Dict[str, Any]]` (line 183) is "an event to write":
 `("ATTEMPT_STARTED", {"attempt": 1})`.
 
-#### `Store.__init__` and the transaction helper (lines 186–232)
+#### `Store.__init__` and the transaction helper (lines 186–236)
 
 ```python
 SCHEMA_VERSION = 1  # stamped in PRAGMA user_version; a newer file refuses an older kernel
@@ -376,21 +376,26 @@ class Store:
         # batch in Postgres instead.
         self.conn = sqlite3.connect(path, isolation_level=None)  # explicit BEGIN/COMMIT only
         self.conn.row_factory = sqlite3.Row
+        # Refuse before touching: the version is read before any DDL runs, so a file written
+        # by a newer kernel is handed back exactly as it was found (IF NOT EXISTS would make
+        # today's DDL harmless, but not the day a v2 renames a table or adds a column).
+        found = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if found > SCHEMA_VERSION:
+            self.conn.close()
+            raise StoreError(f"{path}: schema version {found} is newer than this kernel's {SCHEMA_VERSION}")
         self.conn.executescript(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;" + SCHEMA
         )
-        found = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        if found > SCHEMA_VERSION:
-            raise StoreError(f"{path}: schema version {found} is newer than this kernel's {SCHEMA_VERSION}")
         if found < SCHEMA_VERSION:  # fresh file (0); migrations would run here in order
             self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 ```
 - `isolation_level=None` turns off Python's implicit transaction management so `BEGIN IMMEDIATE`
   is ours. WAL = readers don't block the writer; `synchronous=FULL` = fsync on every commit (the
   durability claim depends on it); `foreign_keys=ON` because SQLite ignores `REFERENCES` otherwise.
-  `CREATE TABLE IF NOT EXISTS` makes opening idempotent; `PRAGMA user_version` then stamps the schema
-  version (1), and a file written by a newer kernel is refused with `StoreError` (exit 4) instead of
-  being misread. **Note for drills:** the connection is
+  `PRAGMA user_version` is read *first*: a file written by a newer kernel is refused with `StoreError`
+  (exit 4) before any DDL has touched it and the connection is closed (`test_newer_schema_is_refused`
+  checks the file still has none of our tables). Then `CREATE TABLE IF NOT EXISTS` makes opening
+  idempotent and a fresh file (0) is stamped with the schema version (1). **Note for drills:** the connection is
   thread-bound by default (`check_same_thread=True`); see §6.2.
 
 ```python
@@ -434,7 +439,7 @@ class Store:
         if r["owner"] != owner:
             raise LostClaim(f"workflow {wf_id} is owned by {r['owner']}, not {owner}")
 ```
-(lines 234–246)
+(lines 238–250)
 - The owner fence (D9). Called inside every write transaction: transitions, ledger, loose events.
   A process that lost its claim (another engine took over) gets `LostClaim` and the `_tx` rollback.
   `owner=None` means "I expect it unowned" (used by `Engine.cancel` for the PENDING→CANCELLED edge).
@@ -457,10 +462,10 @@ class Store:
             [(wf_id, step, t, attempt, dumps(p), now) for t, p in events],
         )
 ```
-(lines 248–261)
+(lines 252–265)
 - The only INSERT into `events`. Private, so nobody appends outside a transaction.
 
-#### Workflows (lines 265–356)
+#### Workflows (lines 269–360)
 
 ```python
     def create_workflow(self, wf_id: str, spec_name: str, spec_version: int,
@@ -521,7 +526,7 @@ class Store:
             if cur.rowcount == 1:
                 self._append(wf_id, None, None, [("OWNER_RELEASED", {"owner": owner})])
 ```
-(lines 303–330)
+(lines 307–334)
 - **Claim = a conditional UPDATE** (compare-and-set): rowcount 0 means someone else owns it →
   `AlreadyOwned` → CLI exit 3 with "use --take-over if that process is dead". `take_over` is the
   unconditional form an operator uses after a crash. **Release** is also conditional on `owner`: a
@@ -544,7 +549,7 @@ class Store:
                 raise LostClaim(f"workflow {wf_id}: expected state {frm}")
             self._append(wf_id, None, None, [("WORKFLOW_STATE", {"from": frm, "to": to, "reason": reason})])
 ```
-(lines 332–343)
+(lines 336–347)
 - The pattern every write follows: (1) check the edge against ALLOWED **before** opening a
   transaction (nothing written); (2) `BEGIN IMMEDIATE`; (3) owner fence; (4) UPDATE with
   `WHERE state = frm` as the *second* fence (a stale view of the row cannot commit); (5) append the
@@ -564,11 +569,11 @@ class Store:
     def cancel_requested(self, wf_id: str) -> bool:
         return self.load_workflow(wf_id).cancel_requested
 ```
-(lines 345–356)
+(lines 349–360)
 - Cancel is a *request* anyone may make (a second CLI process while an engine runs); the engine
   reads the flag between attempts. The one write that is deliberately unfenced.
 
-#### Steps (lines 360–399)
+#### Steps (lines 364–403)
 
 ```python
     def transition_step(self, wf_id: str, name: str, frm: str, to: str, owner: Optional[str],
@@ -603,7 +608,7 @@ class Store:
   fails (see §6.10 bug 2), which is exactly the kind of gap you should be able to name and close
   with a test on the spot.
 
-#### Effects ledger (lines 403–442)
+#### Effects ledger (lines 407–446)
 
 ```python
     def claim_effect(self, key: str, wf_id: str, step: str, effect_name: str, attempt: int,
@@ -656,12 +661,12 @@ class Store:
         return [Event(r["seq"], r["workflow_id"], r["step_name"], r["type"], r["attempt"],
                       json.loads(r["payload_json"]), r["created_at"]) for r in rows]
 ```
-(lines 446–461)
+(lines 450–465)
 - `append_event` is for the two "loose" events that are not transitions: `DECISION` (tool-authored)
   and `EFFECT_AMBIGUOUS` (kernel). Still fenced. `events(kind=...)` is what `history --kind` and
   every test assertion use.
 
-### 3.3 `wfk/engine.py` (396 lines): orchestration
+### 3.3 `wfk/engine.py` (401 lines): orchestration
 
 Responsibility: decide what runs next from what is on disk. Holds nothing between transitions;
 imports no concrete tool and nothing from `faults`.
@@ -829,6 +834,11 @@ class Engine:
 ```python
     def _run_owned(self, wf_id: str, owner: str, spec: WorkflowSpec) -> str:
         wf = self.store.load_workflow(wf_id)  # re-read under our claim
+        if wf.state in WF_TERMINAL:
+            # A cancel landed between run()'s read and the claim: the row was PENDING and
+            # unowned, so the claim went through on a row that is already CANCELLED. There
+            # is nothing to run and nothing to finish; report it and let run() release.
+            return wf.state
         if wf.state == "PENDING":
             self.store.transition_workflow(wf_id, "PENDING", "RUNNING", owner, "started")
 
@@ -861,9 +871,13 @@ class Engine:
         self.store.transition_workflow(wf_id, "RUNNING", state, owner, reason)
         return state
 ```
-(lines 143–175)
+(lines 143–180)
 - The resume algorithm (D8), and it is the same code as the first run; that is the point. Re-read
-  under the claim. First run: PENDING→RUNNING. Resume: any RUNNING step was interrupted; mark it,
+  under the claim; if that re-read is already terminal, a `cancel` landed between `run`'s first read
+  and the claim (the row was PENDING and unowned, so the claim went through): return the state, `run`
+  releases, nothing is written (`test_cancel_racing_start_is_reported_not_raised`; before this check
+  `_finish` tried RUNNING→CANCELLED on a CANCELLED row and the operator saw `LostClaim`, exit 4).
+  First run: PENDING→RUNNING. Resume: any RUNNING step was interrupted; mark it,
   move it back to PENDING with its attempt count intact (`attempt` is not in the `**fields`, so it
   stays). Then walk the spec in order: skip terminal-good steps (their `output_json` is on disk);
   a FAILED step found at entry means we died between `STEP_FAILED` and the workflow's FAILED commit,
@@ -879,7 +893,7 @@ class Engine:
                 inputs[row.name] = row.output
         return inputs
 ```
-(lines 177–183)
+(lines 182–188)
 - Tools see `{"document": ..., "notify_to": ..., "ingest": {...}, "extract": {...}, ...}`, read
   from disk on every attempt. A resumed process therefore sees exactly what the first run produced.
   (SKIPPED steps contribute nothing, which is why the `start` collision check matters.)
@@ -955,7 +969,7 @@ class Engine:
         except (TypeError, ValueError) as e:
             raise FatalError(f"tool output is not JSON-serializable: {e}") from e
 ```
-(lines 185–253)
+(lines 190–258)
 - **The retry loop, top to bottom.** Each iteration re-reads the row (no in-memory state). Cancel
   check first (between attempts, never mid-tool). Budget check: `attempt >= max_attempts` with the
   row PENDING can only mean "interrupted on the last attempt" (a retry is never scheduled without
@@ -1001,7 +1015,7 @@ class Engine:
         self.sleep(remaining)
         return True
 ```
-(lines 255–279)
+(lines 260–284)
 - `_give_up` is the one place `on_failure` is read (D5). `frm` is passed in because it may be
   RUNNING (normal) or PENDING (interrupted last attempt). `_wait_until` sleeps only the remainder
   (`test_restart_during_backoff_waits_the_remainder`: 0.03 s of a 0.05 s backoff after a crash) and
@@ -1038,7 +1052,7 @@ class Engine:
         self.store.complete_effect(key, result, owner=owner, attempt=attempt)
         return result
 ```
-(lines 283–308)
+(lines 288–313)
 - **The idempotency decision (D6/D7), the heart of the take-home.** Three cases on the ledger row:
   DONE → return the stored result, `fn` is never called (C5). CLAIMED → we do not know whether the
   effect happened; write `EFFECT_AMBIGUOUS` (the kernel knows that it does not know), then either
@@ -1060,7 +1074,7 @@ def _move(obj: Dict[str, Any], frm: str, to: str, allowed: set, where: str) -> N
         raise IllegalTransition(f"{where}: {obj['state']} -> {to} (event claims from {frm})")
     obj["state"] = to
 ```
-(lines 315–325)
+(lines 320–330)
 - The replay projection: plain dicts mirroring the three state tables. `_move` is the reducer's
   transition function: it checks the *current* projected state equals the event's claimed `frm`
   and the edge is allowed; otherwise the log itself is inconsistent (`test_replay_rejects_illegal_log`).
@@ -1108,7 +1122,7 @@ def rebuild_state(events: Iterable[Event]) -> Projection:
         # ATTEMPT_FAILED, EFFECT_AMBIGUOUS, DECISION: explanatory, no state change
     return p
 ```
-(lines 328–368)
+(lines 333–373)
 - One branch per state-changing event type; mirror of what each `transition_*`/ledger call does to
   the tables. Note `STEP_FAILED`/`STEP_SKIPPED` use `st["state"]` as `frm` because they can come
   from RUNNING or PENDING. The three purely explanatory types change nothing. **If a branch forgets
@@ -1126,12 +1140,12 @@ def consistency_diff(store: Store, wf_id: str) -> List[str]:
             if stored.get(k) != v:
                 diffs.append(f"{where}.{k}: log says {v!r}, table says {stored.get(k)!r}")
 ```
-(lines 371–379; the rest compares workflow, each step and each effect, and flags steps in the
+(lines 376–384; the rest compares workflow, each step and each effect, and flags steps in the
 table that the log never created)
 - Output format is what `replay` prints under `INCONSISTENT:`, e.g.
   `step classify.attempt: log says 1, table says 7`.
 
-### 3.4 `wfk/tools.py` (156 lines): the work
+### 3.4 `wfk/tools.py` (164 lines): the work
 
 ```python
 class RetryableError(Exception):
@@ -1144,7 +1158,12 @@ class FatalError(Exception):
 
 class Tool(Protocol):
     name: str
-    side_effect_free: bool  # True: no ledger needed, safe to re-run on retry
+    # side_effect_free: True means the tool has no external effect and may be re-run on
+    # retry or resume without the ledger. The kernel enforces nothing from it today:
+    # run_effect is opt-in, and a tool that has an effect and skips the ledger is simply
+    # re-run. The flag is a declaration for readers and for the scheduler in the README's
+    # Design A, which may re-dispatch such a step without consulting the effects table.
+    side_effect_free: bool
     # idempotent: True means the receivers of this tool's effects dedupe on the key the
     # kernel passes them, so an ambiguous (CLAIMED, not DONE) effect may be re-called
     # with the same key. It is a statement about the receiver, declared by the tool.
@@ -1159,9 +1178,11 @@ class Sink(Protocol):
 
     def send(self, key: str, payload: Dict[str, Any]) -> Dict[str, Any]: ...
 ```
-(lines 24–47)
+(lines 24–52)
 - The two error types are the contract between tool and engine. `Tool` is structural: two flags and
-  `run`. `idempotent` is deliberately "a statement about the receiver": `NotifyTool` copies it from
+  `run`. `side_effect_free` is a declaration the kernel does not enforce, and the comment at the
+  declaration says so (a reviewer who greps the engine for it finds nothing, and should find the
+  answer at the field); `run_effect` is opt-in. `idempotent` is deliberately "a statement about the receiver": `NotifyTool` copies it from
   its sink. `Sink` is the receiver interface; `send(key, payload)` is where the kernel-minted key
   crosses the boundary.
 
@@ -1178,7 +1199,7 @@ class IngestTool:
                 "mime": doc.get("mime", "text/plain"),
                 "size_bytes": len(text.encode("utf-8"))}
 ```
-(lines 54–64)
+(lines 59–69)
 - Pure. A missing `document` is `FatalError` (retrying an input cannot help). Falls back to a
   doc id derived from the workflow id.
 
@@ -1193,7 +1214,7 @@ class ExtractTool:
         lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
         return {"title": lines[0][:80], "body": " ".join(lines[1:]), "word_count": len(text.split())}
 ```
-(lines 67–75)
+(lines 72–80)
 - First non-empty line is the title (max 80 chars), the rest the body. Whitespace-only text is the
   `FatalError` that `test_fatal_error_fails_without_retry` uses (`"text": "   "`).
 
@@ -1218,7 +1239,7 @@ class ClassifyTool:
         ctx.record_decision("label", decision)  # auditable: why did this document get this label
         return decision
 ```
-(lines 78–96)
+(lines 83–101)
 - Keyword rules; the label with most hits wins; confidence `0.5 + 0.15·hits` capped at 0.95 (3 hits
   → 0.95 for the example invoice). `record_decision` is the brief's "query decisions made during
   execution": `history --kind DECISION` returns `{"label": "invoice", "confidence": 0.95, "rule":
@@ -1242,7 +1263,7 @@ class NotifyTool:
                            f"(confidence {inputs['classify']['confidence']})."}
         return {"email": ctx.run_effect("email", payload, self.sink.send)}
 ```
-(lines 99–113)
+(lines 104–118)
 - The only effectful tool. Builds the payload from three earlier outputs, then hands the *function*
   `self.sink.send` to the kernel; the kernel decides whether to call it. Output is
   `{"email": <sink result>}`.
@@ -1280,8 +1301,11 @@ class FileNotifier:
 
     def send(self, key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         self.calls += 1
-        if key in self.sent_keys():
+        if self.idempotent and key in self.sent_keys():
             return {"status": "duplicate", "key": key}
+        # idempotent=False models a receiver that ignores the key (a bare SMTP relay): every
+        # call is a delivery, so a resend here would be the duplicate the ledger exists to
+        # prevent, and the kernel must never make that call on its own.
         row = {"key": key, "payload": payload}
         with open(self.path, "a") as f:
             f.write(json.dumps(row, sort_keys=True) + "\n")
@@ -1290,13 +1314,15 @@ class FileNotifier:
         self.sent_keys()[key] = row
         return {"status": "sent", "key": key, "to": payload["to"]}
 ```
-(lines 116–156)
+(lines 121–164)
 - Stands in for SES/SendGrid: a dedupe index keyed by the idempotency key, lazily loaded from the
   file (a "new process" reads the receiver's state from disk). `fsync` makes "accepted" durable so
   the crash window is real. `calls` vs lines in the file is how tests prove "two invocations, one
   effect". **Note:** `send` returns `payload["to"]`, so any payload without `to` is a `KeyError`
   (which the engine treats as retryable; see §6.8 pitfall). `idempotent=False` is how tests model
-  a legacy relay.
+  a legacy relay, and it is behaviour, not a label: with it every call is a delivery, so a resend
+  would be the duplicate (`test_file_notifier_honours_the_key_only_when_it_says_it_does`; before
+  this the flag changed what the tool declared and nothing about what the receiver did).
 
 ### 3.5 `wfk/faults.py` (88 lines): crash injection, never imported by the kernel
 
@@ -1382,7 +1408,7 @@ def parse_fail_spec(spec: Optional[str]) -> Dict[str, int]:
 ```
 (lines 81–88)
 
-### 3.6 `wfk/cli.py` (248 lines): wiring and the operator surface
+### 3.6 `wfk/cli.py` (249 lines): wiring and the operator surface
 
 ```python
 def build_registry(notifications: str, fail: Optional[str] = None,
@@ -1460,7 +1486,10 @@ def cmd_replay(a: argparse.Namespace, store: Store) -> int:
     print("CONSISTENT: event log reproduces the stored state")
     return 0
 ```
-(lines 172–187) D10: replay never calls a tool.
+(lines 173–188) D10: replay never calls a tool.
+
+`cmd_history` (166–170) loads the workflow first: an unknown id is `NotFound`, exit 4, like every
+other verb, not an empty history that looks like a workflow with no events.
 
 `_NARRATORS` (lines 82–101) is one lambda per event type turning a payload into the one-line
 narrative `history` prints; `narrate` (104–106) formats `seq  time  step  TYPE  text`. `main`
@@ -1627,11 +1656,11 @@ stay PENDING 0/n forever, visible in `status`. `test_retry_then_success` asserts
    `engine.py` applies the same sets on read, so there is one machine, not two." Point at the two
    edges added during implementation (`PENDING → FAILED | SKIPPED`) and say why: a step interrupted
    on its last attempt.
-3. (2 min) **One write = one fenced transaction.** Open `store.py:377-399` (`transition_step`).
+3. (2 min) **One write = one fenced transaction.** Open `store.py:381-403` (`transition_step`).
    Read it top to bottom: ALLOWED check, `BEGIN IMMEDIATE`, owner fence, `UPDATE ... WHERE state = ?`,
    `rowcount != 1 → LostClaim`, append events, COMMIT. "Tables and log cannot disagree because they
    are written together; a stale engine cannot write anything because every write passes `_fence`."
-4. (3 min) **The effects ledger.** Open `engine.py:283-308` (`_run_effect`) and `effect_key` above
+4. (3 min) **The effects ledger.** Open `engine.py:288-313` (`_run_effect`) and `effect_key` above
    it. "Key has no attempt number. Three cases: DONE → return stored result; CLAIMED → record
    `EFFECT_AMBIGUOUS`, then resend if the tool says its receiver dedupes, else fail the step and
    leave the row for an operator; no row → claim, call, complete." Then state the guarantee verbatim.
@@ -1822,7 +1851,7 @@ In `StepContext.__init__` (after line 50) and the two services:
 +        self._open()
          return self._engine._run_effect(...)
 ```
-In `_run_step` line 212:
+In `_run_step` line 217:
 ```python
 -                output = tool.run(ctx, self._inputs(wf_id))  # the only place a tool runs; no transaction open
 +                output = self._call(tool, ctx, self._inputs(wf_id), step.timeout_s)  # the only place a tool runs
@@ -1910,7 +1939,7 @@ reason, no new state or event type.
 +            raise ValueError(f"spec {self.name}: deadline_s must be > 0")
          names = [s.name for s in self.steps]
 ```
-`wfk/engine.py` `_run_owned`, before the step loop (line 160):
+`wfk/engine.py` `_run_owned`, before the step loop (line 165):
 ```python
 +        deadline = from_iso(wf.created_at) + spec.deadline_s if spec.deadline_s else None
          for step in spec.steps:
@@ -2291,7 +2320,7 @@ Tamper-evidence (hash-chaining `prev_hash`) is prose in D14, not built.
 Verified by seeding each bug alone in a clean copy and running the suite.
 
 **Bug 1: the effect key includes the attempt number.**
-`engine.py:285` becomes `key = effect_key(wf_id, step_name, f"{name}#{attempt}")`.
+`engine.py:290` becomes `key = effect_key(wf_id, step_name, f"{name}#{attempt}")`.
 *Caught by 5 tests:* `test_notify_effect_once_across_crash`, `test_ambiguous_non_idempotent_fails_safely`,
 `test_done_effect_is_not_resent_on_resume`, `test_replay_rebuild_equals_tables`,
 `test_fenced_out_engine_cannot_finish_the_effect`. *How you'd find it from `history`:* after a
@@ -2299,7 +2328,7 @@ crash/resume there are two `EFFECT_CLAIMED` lines with different keys and no `EF
 `notifications.jsonl` has two lines. Symptom → "the key changed between attempts" → `effect_key`.
 
 **Bug 2: the state fence is dropped from `transition_step`.**
-`store.py:387-388` loses `AND state = ?` (and `frm` from the params).
+`store.py:391-392` loses `AND state = ?` (and `frm` from the params).
 *Caught by: no existing test.* This is a real gap; say so and close it on the spot:
 ```python
 def test_stale_row_view_cannot_commit(make_engine):
@@ -2318,7 +2347,7 @@ def test_stale_row_view_cannot_commit(make_engine):
 from PENDING)`: the reducer is the second line of defence.
 
 **Bug 3: the reducer forgets to clear `next_run_at` on `ATTEMPT_STARTED`.**
-`engine.py:345` becomes `st["attempt"] = pl["attempt"]`.
+`engine.py:350` becomes `st["attempt"] = pl["attempt"]`.
 *Caught by 1 test:* `test_replay_rebuild_equals_tables` (after a retry the table has
 `next_run_at = NULL`, the projection still has the deadline). *From the CLI:* `replay` on any
 retried workflow prints `step extract.next_run_at: log says '2026-...', table says None`. Symptom →
@@ -2487,21 +2516,21 @@ fence re-checked in every write instead of a TTL lease; `--take-over` is the ope
 **Anchors (file:line):**
 - `spec.py:15-27` StepSpec; `:30-43` WorkflowSpec; `:46-53` TRIAGE_V1 + SPECS; `:56-64` JSON loader
 - `store.py:27-41` WF_ALLOWED / STEP_ALLOWED / STEP_FIELDS; `:44-69` errors; `:72-118` schema
-- `store.py:186` SCHEMA_VERSION; `:189-208` `Store.__init__` (pragmas, user_version check); `:216-232` `_tx`
-  (BEGIN IMMEDIATE); `:234-246` `_fence`; `:248-261` `_append` (the observability funnel)
-- `store.py:265-286` create_workflow; `:303-330` claim/release; `:332-343` transition_workflow;
-  `:345-356` request_cancel; `:377-399` transition_step; `:412-437` claim_effect/complete_effect;
-  `:446-461` append_event/events
+- `store.py:186` SCHEMA_VERSION; `:189-212` `Store.__init__` (pragmas, user_version check); `:220-236` `_tx`
+  (BEGIN IMMEDIATE); `:238-250` `_fence`; `:252-265` `_append` (the observability funnel)
+- `store.py:269-290` create_workflow; `:307-334` claim/release; `:336-347` transition_workflow;
+  `:349-360` request_cancel; `:381-403` transition_step; `:416-441` claim_effect/complete_effect;
+  `:450-465` append_event/events
 - `engine.py:27-40` AmbiguousEffect + `effect_key`; `:43-61` StepContext; `:75-90` start;
-  `:92-106` cancel; `:108-126` run (except Exception vs BaseException); `:143-175` `_run_owned`
-  (resume); `:185-242` `_run_step` (retry loop; cancel re-check after the wait at 203);
-  `:244-253` `_encode_output`; `:255-279` `_give_up`/`_wait_until` (clamp at 275);
-  `:283-308` `_run_effect`; `:328-368` `rebuild_state`; `:371-396` `consistency_diff`
-- `tools.py:24-47` errors, Tool, Sink protocols; `:54-96` ingest/extract/classify; `:99-113`
-  NotifyTool; `:116-156` FileNotifier
+  `:92-106` cancel; `:108-126` run (except Exception vs BaseException); `:143-180` `_run_owned`
+  (resume); `:190-247` `_run_step` (retry loop; cancel re-check after the wait at 208);
+  `:249-258` `_encode_output`; `:260-284` `_give_up`/`_wait_until` (clamp at 280);
+  `:288-313` `_run_effect`; `:333-373` `rebuild_state`; `:376-401` `consistency_diff`
+- `tools.py:24-52` errors, Tool, Sink protocols; `:59-101` ingest/extract/classify; `:104-118`
+  NotifyTool; `:121-164` FileNotifier
 - `faults.py:20-22` SimulatedCrash(BaseException); `:55-64` CrashingSink; `:67-78` CrashAfterCommit
-- `cli.py:26-37` build_registry (where tools get names); `:125-142` `_run` (os._exit); `:172-187`
-  cmd_replay; `:226-248` main + exit codes
+- `cli.py:26-37` build_registry (where tools get names); `:125-142` `_run` (os._exit); `:173-188`
+  cmd_replay; `:227-249` main + exit codes
 - `tests/conftest.py:19-31` FakeClock; `:56-69` make_engine (fresh Store = new process)
 
 **Key terms:** attempt = one tool invocation (counts *started*; interrupted is charged). Fence =
@@ -2512,7 +2541,7 @@ Decision = tool-authored event. `side_effect_free` = re-run freely; `idempotent`
 on the key.
 
 **Numbers:** 4 tables; 16 event types; edges 5 (wf) + 7 (step); 6 verbs; exit codes 0/1/2/3/4/5/6;
-27 tests, 7 files; clean run = 16 events, crash+resume = 20; backoff `min(0.05·2^(n−1), 2.0)`;
+31 tests, 7 files; clean run = 16 events, crash+resume = 20; backoff `min(0.05·2^(n−1), 2.0)`;
 triage attempts 3/3/2/5, notify `skip`; owner token 8 hex; default workflow id 12 hex.
 
 **Event types (16):** WORKFLOW_CREATED, WORKFLOW_STATE, OWNER_CLAIMED, OWNER_RELEASED,
@@ -2545,24 +2574,44 @@ reasoning, in the past tense ("I noticed", "I decided"); they are.
 
 | Where | What is there | How to talk about it |
 |---|---|---|
-| `engine.py:203-204` (fix, `test_cancel_during_backoff_is_honoured_before_the_next_attempt`) | The cancel flag is re-read after any backoff wait; `_wait_until` returns whether it waited. | "My cancel check was before the sleep, so a cancel that arrived during a two-second backoff ran one more attempt. For notify that is one more send. I re-check after the wait; the test injects the cancel into the sleep itself." |
-| `engine.py:213`, `:244-253` (fix, `test_non_json_output_is_fatal_not_retried`) | `_encode_output`: a step output must be a JSON object; anything else is `FatalError`. | "A tool returning something I cannot persist is a bug, not a transient. Before, `dumps` failed inside the retry ladder and the step was retried N times with backoff and then blamed on a 'transient failure'. Now it fails once with reason `fatal` and the error names JSON. The kernel-side counterpart of 'a tool that knows better raises FatalError'." |
-| `engine.py:271-275` (fix, `test_backoff_wait_is_clamped_when_the_clock_steps_backwards`) | The wait is `min(remainder, BACKOFF_CAP_S)`. | "`next_run_at` is wall-clock time written by a possibly different process. If the clock steps backwards, NTP or a VM restore, the remainder can be hours although no delay I schedule exceeds two seconds. Clamping bounds the damage of a skewed clock to one maximum backoff. The test moves the fake clock back an hour and asserts a two-second sleep." |
-| `store.py:186`, `:204-208` (feat, `test_newer_schema_is_refused`) | `PRAGMA user_version` stamped at first open; a newer file raises `StoreError`, exit 4. | "`CREATE TABLE IF NOT EXISTS` makes opening idempotent but says nothing about which schema the file holds. A file written by a newer kernel would be misread silently. One pragma; the migration ladder would run in that same branch." |
+| `engine.py:208-209` (fix, `test_cancel_during_backoff_is_honoured_before_the_next_attempt`) | The cancel flag is re-read after any backoff wait; `_wait_until` returns whether it waited. | "My cancel check was before the sleep, so a cancel that arrived during a two-second backoff ran one more attempt. For notify that is one more send. I re-check after the wait; the test injects the cancel into the sleep itself." |
+| `engine.py:218`, `:249-258` (fix, `test_non_json_output_is_fatal_not_retried`) | `_encode_output`: a step output must be a JSON object; anything else is `FatalError`. | "A tool returning something I cannot persist is a bug, not a transient. Before, `dumps` failed inside the retry ladder and the step was retried N times with backoff and then blamed on a 'transient failure'. Now it fails once with reason `fatal` and the error names JSON. The kernel-side counterpart of 'a tool that knows better raises FatalError'." |
+| `engine.py:276-280` (fix, `test_backoff_wait_is_clamped_when_the_clock_steps_backwards`) | The wait is `min(remainder, BACKOFF_CAP_S)`. | "`next_run_at` is wall-clock time written by a possibly different process. If the clock steps backwards, NTP or a VM restore, the remainder can be hours although no delay I schedule exceeds two seconds. Clamping bounds the damage of a skewed clock to one maximum backoff. The test moves the fake clock back an hour and asserts a two-second sleep." |
+| `store.py:186`, `:202-212` (feat, `test_newer_schema_is_refused`) | `PRAGMA user_version` stamped at first open; a newer file raises `StoreError`, exit 4. | "`CREATE TABLE IF NOT EXISTS` makes opening idempotent but says nothing about which schema the file holds. A file written by a newer kernel would be misread silently. One pragma; the migration ladder would run in that same branch." |
 | `engine.py:35-39` (comment) | The effect key is deliberately free of the spec version; a step rename is a key change; migration carries an alias; tenant id goes first. | "The key must survive a migration, or the receiver sees a new key and the duplicate the ledger exists to prevent goes out. So the key is workflow, step, effect name, nothing else, and renaming a step is a versioning event with an alias." |
-| `engine.py:149-153` (comment) | An interrupted attempt retries immediately; fine under a human `--take-over`, needs a backoff under automatic lease expiry. | "Resume is an operator action here, so immediate is right. The moment resume is automatic, an input that kills the worker gets redelivered at once max_attempts times; the interrupted path would schedule a backoff like a failed one. It is in the roadmap next to jitter." |
-| `engine.py:195-198` (comment) | The exhausted branch is the poison-pill bound. | "`ATTEMPT_STARTED` is committed before the tool runs, so a crash costs an attempt. An input that kills the process every time reaches the failure policy after max_attempts crashes instead of being resumed forever." |
-| `engine.py:225-228` (comment) | No jitter, and why. | "Deterministic delays keep the retry test exact and a single process never contends with itself. A fleet retrying the same outage needs jitter, one line, or the retries synchronise into waves." |
-| `engine.py:299-304` (comment) | The ledger records the claim, not the payload; the resend rebuilds it from persisted outputs; production adds a payload hash. | "A resend is byte-identical only because my tools are pure functions of their persisted inputs. A receiver dedupes by key and keeps the first body, so a changed payload would vanish silently. The production row carries a payload hash and the kernel refuses a resend that differs." |
+| `engine.py:154-158` (comment) | An interrupted attempt retries immediately; fine under a human `--take-over`, needs a backoff under automatic lease expiry. | "Resume is an operator action here, so immediate is right. The moment resume is automatic, an input that kills the worker gets redelivered at once max_attempts times; the interrupted path would schedule a backoff like a failed one. It is in the roadmap next to jitter." |
+| `engine.py:200-203` (comment) | The exhausted branch is the poison-pill bound. | "`ATTEMPT_STARTED` is committed before the tool runs, so a crash costs an attempt. An input that kills the process every time reaches the failure policy after max_attempts crashes instead of being resumed forever." |
+| `engine.py:230-233` (comment) | No jitter, and why. | "Deterministic delays keep the retry test exact and a single process never contends with itself. A fleet retrying the same outage needs jitter, one line, or the retries synchronise into waves." |
+| `engine.py:304-309` (comment) | The ledger records the claim, not the payload; the resend rebuilds it from persisted outputs; production adds a payload hash. | "A resend is byte-identical only because my tools are pure functions of their persisted inputs. A receiver dedupes by key and keeps the first body, so a changed payload would vanish silently. The production row carries a payload hash and the kernel refuses a resend that differs." |
 | `store.py:192-198` (comment) | Connection thread affinity; a second `Store` is a second process; fsync cost of `synchronous=FULL`. | "One connection, one thread, one process; the owner fence, not the object, keeps two apart. FULL is an fsync per commit, about a dozen per clean run, which is the price of 'durable before the next action' on one disk; Postgres pays it per batch." |
-| `store.py:219-225` (comment) | `BEGIN IMMEDIATE` vs `DEFERRED`; busy timeout then exit 6. | "A deferred transaction evaluates my fence against a snapshot that another writer may have made stale, and the upgrade to the write lock then fails with SQLITE_BUSY. IMMEDIATE takes the lock first so the fence reads the truth the commit is based on." |
-| `store.py:238-241` (comment) | The fence is checked at commit time because the dangerous process is the slow live one. | "The process that died is harmless. The one that was alive and slow still believes it owns the workflow; nothing it does between transactions matters, and the first thing it tries to commit is refused." |
-| `store.py:250-255` (comment) | `_append` is the single funnel for every state change: the observability hook. | "Every state change is one INSERT here, so metrics, a span per attempt and a change feed hang off one place after COMMIT, with no second instrumentation path to keep in sync." |
-| `store.py:306-312` (comment) | `take_over` is unconditional by design; the fence protects the data; an in-flight effect still lands; fleet lease + token. | "The operator asserts the old owner is dead. If they are wrong, the fence stops every commit, but a side effect already inside the old tool still lands, which is exactly what the ledger is for. The fleet replaces the assertion with `lease_until` and a `lease_token` in every WHERE." |
-| `tools.py:130-135` (comment) | The file is the receiver's truth, the dict its cache; two live writers is the receiver's problem. | "The index is loaded once from the file, so a take-over process sees what the dead one wrote. Two live processes appending would each trust their own index; a real provider dedupes in its own database, and the kernel's fence is what keeps a second live process from getting here." |
+| `store.py:223-229` (comment) | `BEGIN IMMEDIATE` vs `DEFERRED`; busy timeout then exit 6. | "A deferred transaction evaluates my fence against a snapshot that another writer may have made stale, and the upgrade to the write lock then fails with SQLITE_BUSY. IMMEDIATE takes the lock first so the fence reads the truth the commit is based on." |
+| `store.py:242-245` (comment) | The fence is checked at commit time because the dangerous process is the slow live one. | "The process that died is harmless. The one that was alive and slow still believes it owns the workflow; nothing it does between transactions matters, and the first thing it tries to commit is refused." |
+| `store.py:254-259` (comment) | `_append` is the single funnel for every state change: the observability hook. | "Every state change is one INSERT here, so metrics, a span per attempt and a change feed hang off one place after COMMIT, with no second instrumentation path to keep in sync." |
+| `store.py:310-316` (comment) | `take_over` is unconditional by design; the fence protects the data; an in-flight effect still lands; fleet lease + token. | "The operator asserts the old owner is dead. If they are wrong, the fence stops every commit, but a side effect already inside the old tool still lands, which is exactly what the ledger is for. The fleet replaces the assertion with `lease_until` and a `lease_token` in every WHERE." |
+| `tools.py:135-140` (comment) | The file is the receiver's truth, the dict its cache; two live writers is the receiver's problem. | "The index is loaded once from the file, so a take-over process sees what the dead one wrote. Two live processes appending would each trust their own index; a real provider dedupes in its own database, and the kernel's fence is what keeps a second live process from getting here." |
 | `cli.py:135-138` (comment) | `os._exit`, not `sys.exit`. | "`SystemExit` unwinds through `finally` and closes the connection cleanly; the demo would be rehearsing a graceful shutdown while claiming to show a crash. The stale owner left on disk is the evidence nothing ran after the kill." |
 | README "Production roadmap" | Six items in order: lease + token, reconciler + `effects resolve`, payload hash, backoff-on-interruption + jitter, Postgres + tenant, observability off the funnel. | "The order is dependency order: the lease removes the human from recovery and everything in the scaling section follows from it; the reconciler closes the one loop the kernel hands to a human with no verb; the rest is hardening." |
 
 **If asked "what would you still change?"** Name upgrade 1 from `PRINCIPAL_REVIEW.md`: the
 `effects resolve` verb (drill 6.11), then the payload hash. Both are small; say why you kept them
 out of the submission (the code is complete without them and a live-built verb is a better story).
+
+## 10. What changed in the Oct 31 evening pass and how to talk about it
+
+Five commits after `e003e50` (`9883d73..080c8f0`): three fixes with tests, two new tests for paths
+the design record names, and the docs following. Tests 27 → 31. Full audit with the ranking a Trase
+reviewer would use: `TR_AUDIT.md`. Same rule as §9: say these as your own reasoning, past tense.
+
+| Where | What is there | How to talk about it |
+|---|---|---|
+| `engine.py:145-149` (fix, `test_cancel_racing_start_is_reported_not_raised`) | After the re-read under the claim, a terminal state is returned as-is. | "`run` reads the row, then claims it. A `cancel` landing in between leaves a CANCELLED, unowned row, and the claim still succeeds on it. My `_finish` then tried RUNNING→CANCELLED and the operator saw `LostClaim` for a workflow that had ended correctly. The disk was right; the signal was wrong. One check under the claim; the test injects the cancel at the claim boundary with a `Store` subclass, the same way the crash tests inject crashes." |
+| `tests/test_restart.py` (`test_interrupted_last_attempt_goes_to_the_failure_policy`, `test_crash_after_step_failed_finishes_the_workflow`) | The two resume-only paths now have tests. | "The design record says the `PENDING → FAILED \| SKIPPED` edges were the case I missed on paper. The code handled it; nothing pinned it. Now a crash inside classify's last attempt resumes to FAILED with reason `exhausted`, the error names both the interruption and the earlier error, there is no `ATTEMPT_FAILED` for the interrupted attempt, and `replay` is consistent through that edge. The second test kills the process right after `STEP_FAILED` commits and checks the next process finishes the workflow without a new attempt." |
+| `cli.py:167` (fix, `test_operator_errors_exit_cleanly`) | `history <unknown id>` is exit 4. | "Every other verb raised `NotFound`; `history` printed nothing and exited 0, so a typo looked like an empty history. The README promises every operator error is a message with an exit code; this one was the exception." |
+| `store.py:201-209` (fix, `test_newer_schema_is_refused`) | The version check runs before the DDL; refusal closes the connection; the test asserts the newer file has none of our tables. | "Refuse before touching. `IF NOT EXISTS` made the old order harmless today, but the day v2 renames a table, running v1's DDL first against a v2 file is exactly the corruption the stamp exists to prevent." |
+| `tools.py:34-39` (comment), `tools.py:153-157` (fix, `test_file_notifier_honours_the_key_only_when_it_says_it_does`) | `side_effect_free` labelled as unenforced; `FileNotifier(idempotent=False)` delivers every call. | "Two honesty fixes on the central abstraction. `side_effect_free` is read by nobody in the kernel, so the field now says it is a declaration, not a contract. And the demo receiver that stands for a bare SMTP relay was quietly deduping like SES; now the flag is behaviour, which is what makes the non-idempotent test mean something." |
+
+**Not done, on purpose** (say so if asked "what else did you find?"): `rebuild_state` turns an
+orphan `EFFECT_DONE` or a step event before `WORKFLOW_CREATED` into a `KeyError`/`TypeError`
+traceback instead of an `IllegalTransition` finding (only a corrupted log reaches it; a 15-minute
+drill, same shape as 6.9); no index on `effects(workflow_id)`; `backoff_base_s` is not validated
+against negatives. Each is in `TR_AUDIT.md` with the reasoning.

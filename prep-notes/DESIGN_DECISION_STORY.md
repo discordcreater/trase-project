@@ -165,7 +165,7 @@ So the kernel is four tables, one mental model, Engine decides, Store remembers,
 
 - Never "the agents decided", "the critic said", "the architect proposed". It is "I considered", "I rejected", "I chose".
 - No disclaimers ("this is a toy", "I didn't have time to"): say what was cut and why in one line, then stop.
-- No reading from notes; know the numbers: 4 tables, 6 modules, 6 verbs, 27 tests (23 before the Oct 31 review pass), 7 test files, C0-C7, 0.05 s / 2 s, 22 findings, 1 HIGH.
+- No reading from notes; know the numbers: 4 tables, 6 modules, 6 verbs, 31 tests (23 before the Oct 31 review passes, 27 after the first), 7 test files, C0-C7, 0.05 s / 2 s, 22 findings, 1 HIGH.
 - Do not claim exactly-once. The guarantee has three clauses; say all three.
 - Do not call the claim a lease. It is a claim without expiry, and the lease is the production evolution.
 

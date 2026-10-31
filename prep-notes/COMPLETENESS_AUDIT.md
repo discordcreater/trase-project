@@ -1,7 +1,8 @@
 # Completeness audit against the brief (PRIVATE, not submitted)
 
-> Oct 31 update: a second review pass (`PRINCIPAL_REVIEW.md`) added four fixes with tests (27 tests
-> now), inline notes and a README roadmap; commits `38e305e..b51a529`, zip rebuilt. The mapping
+> Oct 31 update: a second review pass (`PRINCIPAL_REVIEW.md`) added four fixes with tests (27 tests),
+> inline notes and a README roadmap (commits `38e305e..b51a529`); an evening pass (`TR_AUDIT.md`)
+> added three fixes and four tests (31 tests now; commits `9883d73..080c8f0`), zip rebuilt. The mapping
 > below (written Oct 30 at 23 tests) still holds; counts in it are historical.
 
 Audited 2026-10-30 evening on a fresh `git clone` of the local repo. Every requirement in

@@ -6,8 +6,9 @@ Confidential (Trase asked that the brief and solution never be posted publicly; 
 - Submission zip: `~/claude-code-ws/trase-takehome/dist/ganesh_muthuluru_trase.zip` (built with `git archive` from trase-project HEAD).
 - `REQUIREMENTS_ONE_PAGER.md`: the brief as explicit requirements, implicit expectations and evaluation criteria.
 - `PRINCIPAL_REVIEW.md` (Oct 31): gap analysis, quality verdict per dimension, the inline notes added, commits, zip check, the one decision left to Ganesh.
+- `TR_AUDIT.md` (Oct 31 evening): second principal pass, ten ranked findings (T1-T10), seven applied with tests, 27 → 31 tests, zip rebuilt and tested from the archive.
 - `COMPLETENESS_AUDIT.md`: brief requirement -> where satisfied -> evidence; verdict COMPLETE.
-- `CODE_WALKTHROUGH_FOR_GANESH.md`: annotated, line-anchored walkthrough (anchors as of commit `b51a529`); §9 = what changed in the review pass and how to talk about it.
+- `CODE_WALKTHROUGH_FOR_GANESH.md`: annotated, line-anchored walkthrough (anchors as of commit `080c8f0`); §9 = what changed in the review pass, §10 = the evening pass, and how to talk about each.
 - `DESIGN_DECISION_STORY.md`: the decision narrative and interview commentary.
 - `STUDY_GUIDE_FOR_GANESH.md`: every function, number and crash point, for the no-AI live round.
 - `PRESENTATION.md`: 12-slide deck with speaker notes, 2-minute opening, 30-second close.

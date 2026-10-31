@@ -25,7 +25,7 @@ The whole system in one sentence you can say in your sleep:
 | Step transitions | 7: P→R, R→S, R→P, R→F, R→SK, P→F, P→SK |
 | CLI verbs | 6: `start run status cancel history replay` |
 | Exit codes | 0 ok, 1 replay inconsistent, 2 FAILED/CANCELLED, 3 owned, 4 store refused, 5 bad input, 6 db error |
-| Tests | 27 in 7 files, 0.1 s |
+| Tests | 31 in 7 files, 0.1 s |
 | Backoff | `min(base · 2^(attempt−1), 2.0)`, base 0.05 s → 0.05, 0.1, 0.2, 0.4 … |
 | Triage spec | ingest 3 attempts, extract 3, classify 2, notify 5 + `on_failure=skip` |
 | Effect key | `sha256("{workflow_id}:{step_name}:{effect_name}")`, no attempt number |
@@ -93,7 +93,7 @@ cli  ──►  engine  ──►  store      (engine never imports tools' concr
 Why frozen dataclasses: a spec version is immutable once published (versioning rule C). Why
 `version: int` and a tuple key: `workflows.spec_name + spec_version` pins a running workflow.
 
-### 2.2 `store.py` (460 lines): the only module that talks to SQLite
+### 2.2 `store.py` (465 lines): the only module that talks to SQLite
 
 **Constants.** `WF_ALLOWED`, `STEP_ALLOWED` (the two state machines as set literals),
 `WF_TERMINAL`, `STEP_TERMINAL`, `STEP_FIELDS = {"attempt","output_json","error","next_run_at"}`
@@ -112,8 +112,9 @@ which also blocks SQL injection through the f-string `SET` clause).
 
 **`Store.__init__(path, clock=time.time)`**: `sqlite3.connect(path, isolation_level=None)` → Python
 does no implicit `BEGIN`; we issue `BEGIN IMMEDIATE`/`COMMIT` ourselves. `row_factory = sqlite3.Row`.
-`executescript` runs the three pragmas and `CREATE TABLE IF NOT EXISTS …`; then `PRAGMA user_version`
-is read: newer than `SCHEMA_VERSION` (1) → `StoreError` (exit 4), a fresh file (0) is stamped. `clock` is injected so
+`PRAGMA user_version` is read FIRST: newer than `SCHEMA_VERSION` (1) → close, `StoreError` (exit 4),
+file untouched; then `executescript` runs the three pragmas and `CREATE TABLE IF NOT EXISTS …`, and a
+fresh file (0) is stamped. `clock` is injected so
 tests control time.
 
 **`_tx()`** (contextmanager): `BEGIN IMMEDIATE`; yield; `COMMIT` inside the `try`; on any
@@ -171,7 +172,7 @@ run). Called inside every workflow-scoped write transaction.
 - There is no `UPDATE events` or `DELETE FROM events` anywhere in the file: append-only by
   construction.
 
-### 2.3 `engine.py` (395 lines): orchestration
+### 2.3 `engine.py` (401 lines): orchestration
 
 - `AmbiguousEffect(FatalError)`: raised when a `CLAIMED`-not-`DONE` effect meets a non-idempotent
   tool.
@@ -272,7 +273,7 @@ projection with the rows field by field (workflow: state, cancel_requested, owne
 attempt, output, error, next_run_at; effect: status, result) and reports steps present in the table
 but absent from the log.
 
-### 2.4 `tools.py` (155 lines)
+### 2.4 `tools.py` (164 lines)
 
 - `RetryableError`, `FatalError` (plain `Exception` subclasses).
 - `Tool` Protocol: `name`, `side_effect_free` (declaration: safe to re-run; the kernel does not read
@@ -308,7 +309,7 @@ but absent from the log.
   step, raise `SimulatedCrash`: the between-steps crash point no tool wrapper can reach.
 - `parse_fail_spec("extract:2,notify:1") → {"extract": 2, "notify": 1}`.
 
-### 2.6 `cli.py` (250 lines)
+### 2.6 `cli.py` (249 lines)
 
 - `build_registry(notifications, fail=None, crash_in_notify=False)`: `FileNotifier` sink; four
   tools; `CrashingSink` wrap when asked; `Flaky` wraps from `--fail`; unknown tool → `ValueError`.
@@ -325,7 +326,7 @@ but absent from the log.
 - `cmd_status`: one workflow or all.
 - `cmd_cancel`: `Engine(store, {}).cancel(id)` (no tools needed); prints `CANCELLED`, or who owns
   it and the `--take-over` route, or "no live engine, CANCELLED on next run".
-- `cmd_history`: `--kind`, `--json`.
+- `cmd_history`: `load_workflow` first (unknown id → exit 4, not an empty list); `--kind`, `--json`.
 - `cmd_replay`: no events → `NotFound`; print narrative; `rebuild_state` (raises on an illegal
   log); print the derived summary; `consistency_diff` → `INCONSISTENT` exit 1 or `CONSISTENT` 0.
 - `main(argv)`: argparse with a shared parent parser (`--spec --fail --crash-after
@@ -473,8 +474,8 @@ declared idempotency instead of guessing.
 - `isolation_level=None`: Python's sqlite3 otherwise issues implicit `BEGIN` before DML and never
   before SELECT, which would silently make the fence read non-transactional.
 - `foreign_keys=ON`: steps/events/effects cannot reference a missing workflow.
-- `PRAGMA user_version = 1`: the schema version stamp; a file from a newer kernel is refused
-  (`StoreError`, exit 4) rather than misread.
+- `PRAGMA user_version = 1`: the schema version stamp, read before any DDL runs; a file from a newer
+  kernel is refused (`StoreError`, exit 4) and left untouched rather than misread.
 
 ---
 
@@ -544,7 +545,7 @@ bugs); times come from the injected clock.
   a cancel injected into the backoff sleep → `CANCELLED`, extract 1/3 `PENDING`, classify 0;
   a tool returning `{"when": object()}` → `FAILED` on attempt 1, reason `fatal`, error names JSON.
 - `test_cli.py`: exit codes 4/5 for every operator error; a JSON spec round-trips through
-  `start --no-run` and `run --spec`; `PRAGMA user_version = 99` on the file → `status` exits 4.
+  `start --no-run` and `run --spec`; `PRAGMA user_version = 99` on the file → `status` exits 4 and the file still has no tables of ours; `history missing` exits 4.
 
 ---
 
@@ -842,3 +843,20 @@ last seen `seq`.
       and why the ledger.
 - [ ] Give the scaling story in 60 seconds: shard, Postgres, queue, lease+token, reconciler.
 - [ ] Add a step, add a timeout, add cooperative cancel, each in under 5 minutes.
+
+## 11. Oct 31 evening pass: five things that changed (know them cold)
+
+Commits `9883d73..080c8f0`; tests 27 → 31; full reasoning in `TR_AUDIT.md`, talking points in
+`CODE_WALKTHROUGH_FOR_GANESH.md` §10.
+
+1. **`cancel` racing `start`** (`engine.py:145-149`): the re-read under the claim returns a terminal
+   state instead of letting `_finish` raise `LostClaim`. Test injects the cancel inside `claim`.
+2. **Interrupted last attempt** (`test_interrupted_last_attempt_goes_to_the_failure_policy`): crash
+   inside classify's attempt 2 of 2 → resume → `PENDING → FAILED`, reason `exhausted`, error
+   "attempt 2 of 2 was interrupted; no attempts left (error before it: ...)", no `ATTEMPT_FAILED`
+   for attempt 2, replay consistent. Sister test: crash right after `STEP_FAILED` → next process
+   commits the workflow `FAILED`, no new attempt.
+3. **`history <unknown id>`** → exit 4 (`cli.py:167`).
+4. **Schema check before DDL** (`store.py:201-209`): refuse, close, leave the newer file untouched.
+5. **`FileNotifier(idempotent=False)` delivers every call** (`tools.py:153`); `side_effect_free` is
+   labelled as a declaration the kernel does not enforce (`tools.py:34-39`).
