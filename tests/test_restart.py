@@ -111,3 +111,24 @@ def test_fenced_out_engine_cannot_finish_the_effect(make_engine, notifications):
     assert store.events(wf_id, "EFFECT_DONE")[0].attempt == 2                  # attributed to B's attempt
     with open(notifications) as f:
         assert len(f.readlines()) == 1
+
+
+def test_backoff_wait_is_clamped_when_the_clock_steps_backwards(make_engine, notifications, clock):
+    """next_run_at is wall-clock time from another process. If the clock stepped back by an
+    hour, the remainder must be bounded by the largest delay the engine ever schedules."""
+    from wfk.engine import Engine
+    from wfk.faults import Flaky
+
+    def die_while_sleeping(_s):
+        raise SimulatedCrash("killed during backoff")
+
+    engine1 = make_engine(registry(FileNotifier(notifications), extract=Flaky(ExtractTool(), 1)))
+    engine1.sleep = die_while_sleeping
+    wf_id = engine1.start(TRIAGE_V1, INPUT)
+    with pytest.raises(SimulatedCrash):
+        engine1.run(wf_id)
+
+    clock.t -= 3600                                       # the clock went back an hour
+    engine2 = make_engine(registry(FileNotifier(notifications)))
+    assert engine2.run(wf_id, take_over=True) == "SUCCEEDED"
+    assert clock.slept == [Engine.BACKOFF_CAP_S]          # 2 s, not 3600.05 s

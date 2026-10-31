@@ -251,7 +251,11 @@ class Engine:
         """Sleep until the persisted deadline. Returns True if it waited at all."""
         if not next_run_at:
             return False
-        remaining = from_iso(next_run_at) - self.store.clock()
+        # next_run_at is wall-clock time written by a possibly different process. If the
+        # clock stepped backwards between the write and this read (NTP, a VM restore), the
+        # remainder can be hours even though no scheduled delay ever exceeds BACKOFF_CAP_S.
+        # Clamping bounds the damage of a skewed clock to one maximum backoff.
+        remaining = min(from_iso(next_run_at) - self.store.clock(), self.BACKOFF_CAP_S)
         if remaining <= 0:
             return False
         self.sleep(remaining)
