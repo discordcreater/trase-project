@@ -197,6 +197,7 @@ class Engine:
             ctx = StepContext(self, wf_id, owner, step, attempt, tool)
             try:
                 output = tool.run(ctx, self._inputs(wf_id))  # the only place a tool runs; no transaction open
+                output_json = self._encode_output(output)      # a non-JSON output is a tool bug: fatal, not transient
             except FatalError as e:
                 failed: EventSpec = ("ATTEMPT_FAILED", {"attempt": attempt, "error": str(e), "retryable": False})
                 reason = "ambiguous_effect" if isinstance(e, AmbiguousEffect) else "fatal"
@@ -220,8 +221,19 @@ class Engine:
 
             self.store.transition_step(wf_id, step.name, "RUNNING", "SUCCEEDED", owner,
                                        [("STEP_SUCCEEDED", {"attempt": attempt, "output": output})],
-                                       attempt_no=attempt, output_json=dumps(output), error=None)
+                                       attempt_no=attempt, output_json=output_json, error=None)
             return "SUCCEEDED"
+
+    @staticmethod
+    def _encode_output(output: Any) -> str:
+        """A step output must be a JSON object: it is persisted and fed to later steps.
+        Anything else cannot be fixed by retrying, so it is a FatalError."""
+        if not isinstance(output, dict):
+            raise FatalError(f"tool returned {type(output).__name__}, not a JSON object")
+        try:
+            return dumps(output)
+        except (TypeError, ValueError) as e:
+            raise FatalError(f"tool output is not JSON-serializable: {e}") from e
 
     def _give_up(self, wf_id: str, owner: str, step: StepSpec, frm: str, attempt: int,
                  reason: str, error: str, events: List[EventSpec]) -> str:

@@ -145,3 +145,20 @@ def test_cancel_during_backoff_is_honoured_before_the_next_attempt(make_engine, 
     extract = engine.store.load_step(wf_id, "extract")
     assert flaky.calls == 1 and extract.attempt == 1 and extract.state == "PENDING"
     assert engine.store.load_step(wf_id, "classify").attempt == 0
+
+
+def test_non_json_output_is_fatal_not_retried(make_engine, notifications):
+    """A tool whose output cannot be persisted is a bug: one attempt, reason 'fatal'."""
+    class BadOutput:
+        name, side_effect_free, idempotent = "classify", True, True
+
+        def run(self, ctx, inputs):
+            return {"when": object()}  # not JSON-serializable
+
+    engine = make_engine(registry(FileNotifier(notifications), classify=BadOutput()))
+    wf_id = engine.start(TRIAGE_V1, INPUT)
+    assert engine.run(wf_id) == "FAILED"
+    classify = engine.store.load_step(wf_id, "classify")
+    assert classify.state == "FAILED" and classify.attempt == 1
+    assert engine.store.events(wf_id, "STEP_FAILED")[0].payload["reason"] == "fatal"
+    assert "JSON" in classify.error
