@@ -187,7 +187,8 @@ class Engine:
                 if row.error:
                     error += f" (error before it: {row.error})"
                 return self._give_up(wf_id, owner, step, row.state, row.attempt, "exhausted", error, [])
-            self._wait_until(row.next_run_at)
+            if self._wait_until(row.next_run_at) and self.store.cancel_requested(wf_id):
+                return "CANCELLED"  # a cancel that arrived during the backoff is honoured before the attempt
 
             attempt = row.attempt + 1
             self.store.transition_step(wf_id, step.name, "PENDING", "RUNNING", owner,
@@ -234,11 +235,15 @@ class Engine:
                                    attempt_no=attempt, error=error)
         return to
 
-    def _wait_until(self, next_run_at: Optional[str]) -> None:
-        if next_run_at:
-            remaining = from_iso(next_run_at) - self.store.clock()
-            if remaining > 0:
-                self.sleep(remaining)
+    def _wait_until(self, next_run_at: Optional[str]) -> bool:
+        """Sleep until the persisted deadline. Returns True if it waited at all."""
+        if not next_run_at:
+            return False
+        remaining = from_iso(next_run_at) - self.store.clock()
+        if remaining <= 0:
+            return False
+        self.sleep(remaining)
+        return True
 
     # ---- effects ledger -----------------------------------------------------
 

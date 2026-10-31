@@ -2,7 +2,7 @@ import pytest
 
 from wfk.spec import TRIAGE_V1
 from wfk.store import IllegalTransition, LostClaim
-from wfk.tools import FileNotifier, RetryableError
+from wfk.tools import ExtractTool, FileNotifier, RetryableError
 
 from .conftest import INPUT, registry
 
@@ -126,3 +126,22 @@ def test_run_on_terminal_workflow_does_not_claim(make_engine):
     n = len(engine.store.events(wf_id))
     assert engine.run(wf_id) == "SUCCEEDED"
     assert len(engine.store.events(wf_id)) == n  # no OWNER_CLAIMED / OWNER_RELEASED noise
+
+
+def test_cancel_during_backoff_is_honoured_before_the_next_attempt(make_engine, notifications, clock):
+    """A cancel that lands while the engine sleeps out a backoff must stop the next
+    attempt, not run it first and notice afterwards."""
+    from wfk.faults import Flaky
+    flaky = Flaky(ExtractTool(), fail_times=99)
+    engine = make_engine(registry(FileNotifier(notifications), extract=flaky))
+    wf_id = engine.start(TRIAGE_V1, INPUT)
+
+    def cancel_while_sleeping(s):
+        clock.sleep(s)
+        engine.cancel(wf_id, by="operator")
+
+    engine.sleep = cancel_while_sleeping
+    assert engine.run(wf_id) == "CANCELLED"
+    extract = engine.store.load_step(wf_id, "extract")
+    assert flaky.calls == 1 and extract.attempt == 1 and extract.state == "PENDING"
+    assert engine.store.load_step(wf_id, "classify").attempt == 0
