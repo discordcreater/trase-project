@@ -42,3 +42,10 @@ def test_spec_file_round_trips_through_start_and_run(run, tmp_path, capsys):
     assert "not registered" in capsys.readouterr().err
     assert run("run", "c1", "--spec", spec_path) == 0
     assert "custom@1" in capsys.readouterr().out
+
+
+def test_newer_schema_is_refused(run, db_path, capsys):
+    import sqlite3
+    sqlite3.connect(db_path).execute("PRAGMA user_version = 99").close()
+    assert run("status") == 4
+    assert "newer than this kernel" in capsys.readouterr().err

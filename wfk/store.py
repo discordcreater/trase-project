@@ -183,6 +183,9 @@ class Event:
 EventSpec = Tuple[str, Dict[str, Any]]
 
 
+SCHEMA_VERSION = 1  # stamped in PRAGMA user_version; a newer file refuses an older kernel
+
+
 class Store:
     def __init__(self, path: str, clock: Callable[[], float] = time.time) -> None:
         self.clock = clock
@@ -191,6 +194,11 @@ class Store:
         self.conn.executescript(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;" + SCHEMA
         )
+        found = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if found > SCHEMA_VERSION:
+            raise StoreError(f"{path}: schema version {found} is newer than this kernel's {SCHEMA_VERSION}")
+        if found < SCHEMA_VERSION:  # fresh file (0); migrations would run here in order
+            self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def close(self) -> None:
         self.conn.close()

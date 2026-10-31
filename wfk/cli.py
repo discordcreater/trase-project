@@ -223,6 +223,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     crash_after = getattr(a, "crash_after", None)
     try:
         store = CrashAfterCommit(a.db, crash_after) if crash_after else Store(a.db)
+    except StoreError as e:  # a database file written by a newer kernel
+        print(f"error: {e}", file=sys.stderr)
+        return 4
     except sqlite3.Error as e:
         print(f"database error: {e}", file=sys.stderr)
         return 6
