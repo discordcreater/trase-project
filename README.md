@@ -24,7 +24,7 @@ docs/DESIGN.md    the full design record (decisions, crash-point table, test pla
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # pytest only
-.venv/bin/python -m pytest                                             # 27 tests, < 1 s
+.venv/bin/python -m pytest                                             # 31 tests, < 1 s
 scripts/demo.sh                                                        # end-to-end demo in a temp dir
 
 python -m wfk start examples/doc.json --id w1          # create and run (db: ./wfk.db)
@@ -67,7 +67,7 @@ install: run it from the repository root.
 One mental model: **Engine decides, Store remembers, Tool does.** Nothing else holds state.
 
 - **Store** (`store.py`) owns a single SQLite file (WAL, `synchronous=FULL`, schema version stamped in
-  `PRAGMA user_version`; a file written by a newer kernel is refused) with four tables:
+  `PRAGMA user_version`; a file written by a newer kernel is refused before any DDL runs) with four tables:
   `workflows`, `steps`, `effects` (the state the engine reads) and `events` (append-only; no
   UPDATE or DELETE statement for it exists in the module). Every state change is one
   `BEGIN IMMEDIATE` transaction that updates a row **and** appends the events that explain it, so
@@ -111,7 +111,9 @@ keeps the audit trail honest. Terminal states are absorbing.
    process leaves a stale owner; the operator clears it with `run --take-over` (the demo shows
    this). There is no TTL stealing on purpose: stealing without a fencing token at commit time
    would let a slow tool and a new owner both commit the same attempt. Assumption: one live engine
-   per database file. A terminal workflow is never claimed; `run` just reports its state.
+   per database file. A terminal workflow is never claimed; `run` just reports its state, and if a
+   `cancel` lands between that read and the claim, the re-read under the claim reports it the same way
+   instead of trying to finish a workflow that already ended.
 2. **Resume**: any step found `RUNNING` was interrupted mid-attempt. It gets an `ATTEMPT_INTERRUPTED`
    event and goes back to `PENDING` with its attempt count intact (the interrupted attempt is
    charged against the budget). Steps already `SUCCEEDED` are never re-run: their `output_json` is
@@ -191,7 +193,7 @@ the crash between steps (`test_restart_resumes_without_rerunning`).
 
 ## What the tests prove
 
-27 tests, one temp SQLite file each, a fake clock so backoff takes no real time. Every crash is
+31 tests, one temp SQLite file each, a fake clock so backoff takes no real time. Every crash is
 injected at a boundary where it happens in production (inside the receiver call, right after a
 commit, during a sleep), never by a hook inside the kernel.
 
@@ -199,11 +201,11 @@ commit, during a sleep), never by a hook inside the kernel.
 |---|---|
 | `test_retry.py` | exponential backoff `[0.05, 0.1]`, `next_run_at` persisted then cleared, earlier steps untouched by a later step's retries |
 | `test_failure_policy.py` | exhaustion fails the workflow and never starts later steps; `on_failure: skip` lets the workflow succeed with the step `SKIPPED` after 5 attempts |
-| `test_idempotency.py` | crash after the receiver accepted: one effect across two invocations (idempotent receiver); the same crash with a non-idempotent receiver fails the step with `ambiguous_effect` and leaves the row `CLAIMED`; a `DONE` row is returned without calling the receiver |
-| `test_restart.py` | crash between steps: new process re-runs nothing; the dead claim blocks a plain `run` and `--take-over` clears it; a crash during backoff waits only the remainder; a clock that stepped back an hour costs at most one capped backoff; a stalled engine that lost its claim cannot commit anything after a take-over |
+| `test_idempotency.py` | crash after the receiver accepted: one effect across two invocations (idempotent receiver); the same crash with a non-idempotent receiver fails the step with `ambiguous_effect` and leaves the row `CLAIMED`; a `DONE` row is returned without calling the receiver; the demo receiver dedupes on the key only when it declares that it does |
+| `test_restart.py` | crash between steps: new process re-runs nothing; the dead claim blocks a plain `run` and `--take-over` clears it; a crash during backoff waits only the remainder; a clock that stepped back an hour costs at most one capped backoff; a stalled engine that lost its claim cannot commit anything after a take-over; a crash inside a step's *last* attempt reaches the failure policy from `PENDING` with no new attempt and no `ATTEMPT_FAILED`; a crash between `STEP_FAILED` and the workflow's `FAILED` commit is finished by the next process |
 | `test_replay.py` | the log reproduces every row after retry + crash + resume; a hand-edited row makes `replay` exit 1; a log that skips a state is rejected by the reducer |
-| `test_transitions.py` | illegal transitions write nothing; a stale owner cannot transition, claim/complete an effect, or append an event; cancel between attempts, before first run, and during a backoff wait; `FatalError` fails without retry; a non-JSON tool output fails once, not N times; input validation; `run` on a terminal workflow does not claim |
-| `test_cli.py` | every operator error is a message with an exit code; a JSON spec round-trips through `start` and `run`; a database file from a newer schema version is refused |
+| `test_transitions.py` | illegal transitions write nothing; a stale owner cannot transition, claim/complete an effect, or append an event; cancel between attempts, before first run, and during a backoff wait; `FatalError` fails without retry; a non-JSON tool output fails once, not N times; input validation; `run` on a terminal workflow does not claim; a cancel that races `start` is reported as `CANCELLED`, not raised |
+| `test_cli.py` | every operator error is a message with an exit code; a JSON spec round-trips through `start` and `run`; a database file from a newer schema version is refused before any DDL runs and left untouched; `history` of an unknown id is an error, not an empty list |
 
 ## Design
 
@@ -330,7 +332,7 @@ What I would build next, in order, and why that order:
 | Tools, CLI, demo | ~0.75 h | |
 | Tests (17) | ~0.75 h | Injected clock/sleep so backoff tests run in milliseconds |
 | README | ~0.5 h | |
-| Self-review, hardening and final docs (+10 tests) | ~1.5 h | Reproduced every README claim and raced two engines: the effects ledger was not owner-fenced (fixed with one `_fence` inside every workflow-scoped transaction, plus a race test); crash injection moved out of the engine into `faults.py`; operator errors became exit codes. Then read the kernel as an operator would run it for a year: a cancel during a backoff wait is now re-checked after the wait; an unserializable tool output is a `FatalError` instead of N transient retries; a clock stepping backwards is clamped to the backoff cap; schema version stamped in `user_version`. Comments at the non-obvious decisions (fence vs lease, effect-key stability, payload hash, poison-pill bound, jitter); README test map and production roadmap |
+| Self-review, hardening and final docs (+14 tests) | ~2 h | Reproduced every README claim and raced two engines: the effects ledger was not owner-fenced (fixed with one `_fence` inside every workflow-scoped transaction, plus a race test); crash injection moved out of the engine into `faults.py`; operator errors became exit codes. Then read the kernel as an operator would run it for a year: a cancel during a backoff wait is now re-checked after the wait; an unserializable tool output is a `FatalError` instead of N transient retries; a clock stepping backwards is clamped to the backoff cap; schema version stamped in `user_version`. Comments at the non-obvious decisions (fence vs lease, effect-key stability, payload hash, poison-pill bound, jitter); README test map and production roadmap. A last read for the paths the crash table does not reach: a cancel racing `start` is reported instead of raised; the interrupted-last-attempt and failed-at-entry resume paths got their tests; `history` of an unknown id is an error; the schema check moved ahead of the DDL; the demo receiver's `idempotent` flag became behaviour |
 
 **Intentionally simplified / cut** (each would be a real feature, none earns its lines here):
 transactional outbox + dispatcher; lease TTL and stealing (needs the fencing token described in A);
