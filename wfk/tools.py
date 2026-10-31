@@ -127,6 +127,12 @@ class FileNotifier:
         self._seen: Optional[Dict[str, Dict[str, Any]]] = None
 
     def sent_keys(self) -> Dict[str, Dict[str, Any]]:
+        # The file is the receiver's truth and this dict is its cache, loaded on first use:
+        # a process that takes over after a crash reads the lines the dead one wrote, so
+        # the dedupe survives the restart. What it does not survive is two live processes
+        # appending to the same file: each would trust its own index. That is the
+        # receiver's problem by design (a real provider dedupes in its own database), and
+        # the kernel's owner fence is what keeps a second live process from getting here.
         if self._seen is None:
             self._seen = {}
             if os.path.exists(self.path):

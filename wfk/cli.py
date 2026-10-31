@@ -132,6 +132,10 @@ def _run(engine: Engine, wf_id: str, take_over: bool) -> int:
     except SimulatedCrash as e:
         print(f"*** SIMULATED CRASH: {e} ***", file=sys.stderr)
         sys.stderr.flush()
+        # os._exit, not sys.exit: SystemExit would unwind through main()'s ``finally``
+        # and close the connection cleanly, and the demo would be rehearsing a graceful
+        # shutdown while claiming to show a crash. The stale owner left on disk is the
+        # evidence that nothing ran after the kill.
         os._exit(1)  # like kill -9: no cleanup, no release of the claim
     print(f"workflow {wf_id} finished: {state}")
     print_status(engine.store, engine.store.load_workflow(wf_id))

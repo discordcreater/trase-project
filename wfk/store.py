@@ -189,6 +189,13 @@ SCHEMA_VERSION = 1  # stamped in PRAGMA user_version; a newer file refuses an ol
 class Store:
     def __init__(self, path: str, clock: Callable[[], float] = time.time) -> None:
         self.clock = clock
+        # One connection, one thread, one process: sqlite3 connections have thread affinity
+        # (check_same_thread stays on) and the engine holds no lock between transactions, so
+        # a second Store on the same file is a second process as far as the design is
+        # concerned; the owner fence, not this object, is what keeps two of them apart.
+        # synchronous=FULL is an fsync per commit (about a dozen per clean run): the cost of
+        # "durable before the next action" on one disk. The fleet version pays it once per
+        # batch in Postgres instead.
         self.conn = sqlite3.connect(path, isolation_level=None)  # explicit BEGIN/COMMIT only
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(
@@ -209,7 +216,13 @@ class Store:
     @contextmanager
     def _tx(self) -> Iterator[None]:
         """BEGIN IMMEDIATE takes the write lock up front, so what the block reads
-        (the owner fence included) is what the COMMIT is based on."""
+        (the owner fence included) is what the COMMIT is based on.
+
+        A DEFERRED transaction would read under a shared lock and upgrade on the
+        first write; under WAL that upgrade fails with SQLITE_BUSY whenever another
+        writer committed in between, and the fence would have been evaluated against
+        a snapshot that is already stale. Contention here is a wait on sqlite3's busy
+        timeout (5 s by default), then ``sqlite3.OperationalError`` (CLI exit 6)."""
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             yield
@@ -220,7 +233,12 @@ class Store:
 
     def _fence(self, wf_id: str, owner: Optional[str]) -> None:
         """Inside a transaction: the workflow must exist and be owned by ``owner``
-        (``None`` = unowned). Every write that belongs to a workflow passes here first."""
+        (``None`` = unowned). Every write that belongs to a workflow passes here first.
+
+        The claim is checked at commit time, not at claim time, because the dangerous
+        process is the one that was alive and slow, not the one that died: it still
+        believes it owns the workflow. Nothing it does between transactions matters;
+        the first thing it tries to commit is refused and rolled back."""
         r = self.conn.execute("SELECT owner FROM workflows WHERE id = ?", (wf_id,)).fetchone()
         if r is None:
             raise NotFound(f"workflow {wf_id} not found")
@@ -229,7 +247,12 @@ class Store:
 
     def _append(self, wf_id: str, step: Optional[str], attempt: Optional[int],
                 events: Sequence[EventSpec]) -> None:
-        """Append events; only ever called inside a transaction."""
+        """Append events; only ever called inside a transaction.
+
+        Every state change in the system funnels through this one INSERT, which makes
+        it the place for observability: a metrics counter per event type, a trace span
+        keyed by (workflow_id, attempt) and a change-data feed would all hang off here
+        after COMMIT, with no second instrumentation path to keep in sync."""
         now = self.now()
         self.conn.executemany(
             "INSERT INTO events (workflow_id, step_name, type, attempt, payload_json, created_at)"
@@ -278,7 +301,15 @@ class Store:
         return [self._workflow(r) for r in rows]
 
     def claim(self, wf_id: str, owner: str, take_over: bool = False) -> None:
-        """Become the single live engine for this workflow (D9)."""
+        """Become the single live engine for this workflow (D9).
+
+        ``take_over`` is unconditional on purpose: the operator asserts the old owner
+        is dead, and if they are wrong the fence (not the claim) protects the data:
+        the old process cannot commit anything, though a side effect already in flight
+        inside its tool still lands, which is what the effects ledger is for. The
+        fleet version replaces the human assertion with a lease: ``lease_until`` for
+        expiry, and a ``lease_token`` that every write's WHERE clause carries, so
+        stealing is automatic and fenced instead of manual and fenced."""
         with self._tx():
             if take_over:
                 cur = self.conn.execute("UPDATE workflows SET owner = ? WHERE id = ?", (owner, wf_id))

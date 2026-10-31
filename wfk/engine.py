@@ -32,6 +32,11 @@ class AmbiguousEffect(FatalError):
 def effect_key(workflow_id: str, step_name: str, effect_name: str) -> str:
     # No attempt number: every attempt of the same logical effect shares one key,
     # so the receiver can dedupe across retries and restarts.
+    # The key is also deliberately free of the spec version: a workflow migrated to a
+    # newer spec must keep presenting the same key for the same logical effect, or the
+    # receiver sees a new key and the duplicate the ledger exists to prevent goes out.
+    # Renaming a step is therefore a key change; a migration that renames one has to
+    # carry a key alias (old name -> new name) with it. A tenant id would go first.
     return hashlib.sha256(f"{workflow_id}:{step_name}:{effect_name}".encode()).hexdigest()
 
 
@@ -141,7 +146,11 @@ class Engine:
             self.store.transition_workflow(wf_id, "PENDING", "RUNNING", owner, "started")
 
         # Resume: a step found RUNNING was interrupted mid-attempt (at most one).
-        # Its attempt stays counted; next_run_at is left as-is.
+        # Its attempt stays counted; next_run_at is left as-is (NULL after ATTEMPT_STARTED,
+        # so the retry is immediate). That is right here, where resume is an operator's
+        # `run --take-over`. With automatic lease expiry (README, A) an input that kills
+        # the worker would be redelivered at once, max_attempts times in a row; there the
+        # interrupted path should schedule a backoff like a failed attempt does.
         for row in self.store.load_steps(wf_id):
             if row.state == "RUNNING":
                 self.store.transition_step(wf_id, row.name, "RUNNING", "PENDING", owner,
@@ -183,6 +192,10 @@ class Engine:
             if row.attempt >= row.max_attempts:
                 # Only an interrupted last attempt gets here (a retry is never scheduled
                 # without budget). No ATTEMPT_FAILED: the attempt was interrupted, not failed.
+                # This branch is also the poison-pill bound: an input that kills the process
+                # on every attempt is charged one attempt per crash (ATTEMPT_STARTED is
+                # committed before the tool runs), so it reaches the failure policy instead
+                # of being resumed forever.
                 error = f"attempt {row.attempt} of {row.max_attempts} was interrupted; no attempts left"
                 if row.error:
                     error += f" (error before it: {row.error})"
@@ -209,6 +222,10 @@ class Engine:
                 failed = ("ATTEMPT_FAILED", {"attempt": attempt, "error": str(e), "retryable": retryable})
                 if not retryable:
                     return self._give_up(wf_id, owner, step, "RUNNING", attempt, "exhausted", str(e), [failed])
+                # Deterministic backoff, no jitter: the retry test asserts the exact delays
+                # and one process never contends with itself. A fleet retrying the same
+                # downstream outage would need jitter here (one line) or the retries
+                # synchronise into waves.
                 delay = min(step.backoff_base_s * 2 ** (attempt - 1), self.BACKOFF_CAP_S)
                 next_run_at = to_iso(self.store.clock() + delay)
                 self.store.transition_step(
@@ -279,6 +296,12 @@ class Engine:
                                       f"completed; receiver cannot dedupe; needs an operator")
             # idempotent receiver: re-call with the SAME key, it dedupes
         else:
+            # The ledger records that the effect was claimed, not what was sent: on a
+            # resend the payload is rebuilt from persisted step outputs, which is the same
+            # bytes as long as the tool is a pure function of its inputs (ours are). A
+            # receiver dedupes by key and keeps the first body, so the production version
+            # of this row carries a payload hash and the kernel refuses a resend whose
+            # payload differs, instead of letting a changed message vanish silently.
             self.store.claim_effect(key, wf_id, step_name, name, attempt, owner=owner)
         result = fn(key, payload)        # external call, outside any transaction
         self.store.complete_effect(key, result, owner=owner, attempt=attempt)
