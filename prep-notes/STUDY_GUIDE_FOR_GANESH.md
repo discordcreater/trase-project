@@ -849,14 +849,14 @@ last seen `seq`.
 Commits `9883d73..080c8f0`; tests 27 → 31; full reasoning in `TR_AUDIT.md`, talking points in
 `CODE_WALKTHROUGH_FOR_GANESH.md` §10.
 
-1. **`cancel` racing `start`** (`engine.py:145-149`): the re-read under the claim returns a terminal
+1. **`cancel` racing `start`** (`engine.py:137-139`): the re-read under the claim returns a terminal
    state instead of letting `_finish` raise `LostClaim`. Test injects the cancel inside `claim`.
 2. **Interrupted last attempt** (`test_interrupted_last_attempt_goes_to_the_failure_policy`): crash
    inside classify's attempt 2 of 2 → resume → `PENDING → FAILED`, reason `exhausted`, error
    "attempt 2 of 2 was interrupted; no attempts left (error before it: ...)", no `ATTEMPT_FAILED`
    for attempt 2, replay consistent. Sister test: crash right after `STEP_FAILED` → next process
    commits the workflow `FAILED`, no new attempt.
-3. **`history <unknown id>`** → exit 4 (`cli.py:167`).
-4. **Schema check before DDL** (`store.py:201-209`): refuse, close, leave the newer file untouched.
-5. **`FileNotifier(idempotent=False)` delivers every call** (`tools.py:153`); `side_effect_free` is
-   labelled as a declaration the kernel does not enforce (`tools.py:34-39`).
+3. **`history <unknown id>`** → exit 4 (`cli.py:164`).
+4. **Schema check before DDL** (`store.py:189-195`): refuse, close, leave the newer file untouched.
+5. **`FileNotifier(idempotent=False)` delivers every call** (`tools.py:135`); `side_effect_free` is
+   labelled as a declaration the kernel does not enforce (`tools.py:29-30`).

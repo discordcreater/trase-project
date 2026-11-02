@@ -1,5 +1,9 @@
 # TR audit: second principal-architect pass (PRIVATE, not submitted)
 
+> Historical record. Its `file:line` anchors refer to the code as of the commit it names; the Nov 2
+> comment-trimming pass shifted line numbers (see `HUMANIZE_PASS.md`, and `CODE_WALKTHROUGH_FOR_GANESH.md`
+> for current anchors).
+
 Oct 31 2026, ~4 PM PT, against `~/claude-code-ws/trase-project` at `e003e50` (after the
 `PRINCIPAL_REVIEW.md` pass). Scope: find what that review did not, ranked the way a principal
 reviewer at Trase would rank it. No scope growth: every item below is either a defect, an

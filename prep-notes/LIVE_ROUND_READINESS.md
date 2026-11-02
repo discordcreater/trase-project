@@ -5,7 +5,10 @@ the existing prep docs; it does not repeat them. Everything marked **verified** 
 copy of the extracted zip, never on the submission.
 
 **Bottom line first:** the zip is complete, correct and matches the canonical code byte for byte.
-**No code, README or zip change is needed before you submit.** The one urgent item is the clock: the
+**Update Nov 2:** the zip was rebuilt after a comment/wording pass (code comments shortened, the DESIGN.md
+status/date header removed, README nits 1 and 2 in §3 fixed; behaviour unchanged, 31 tests pass); see
+`HUMANIZE_PASS.md`. A separate prose rewrite of README/DESIGN may follow; re-check §-references after it.
+**Originally (Nov 1): no code, README or zip change was needed before you submit.** The one urgent item is the clock: the
 48-hour window ended Sun Nov 1 3:18 PM PT. The 24-hour extension request to Adam (sent Nov 1, thread
 `1a18ee4c619c2aad`) has **no reply** as of 11:50 PM. **Submit the zip as-is first thing Monday Nov 2
 morning, before 3 PM PT at the latest.**
@@ -49,7 +52,7 @@ Never practise inside `trase-project` itself; the zip is built from it.
 | Repo privacy | `discordcreater/trase-project` and `discordcreater/job-search-2026` are both **PRIVATE** (checked with `gh`) |
 
 Counts to quote (all re-measured): 4 tables, 6 modules, 6 CLI verbs, 7 exit codes (0-6), 31 tests in 7 files,
-1,444 lines in `wfk/` and 748 in `tests/`, clean run = **16 events**, crash + resume run = **20 events**.
+1,355 lines in `wfk/` (1,444 before the Nov 2 comment trim) and 748 in `tests/`, clean run = **16 events**, crash + resume run = **20 events**.
 
 ---
 
@@ -89,7 +92,7 @@ Counts to quote (all re-measured): 4 tables, 6 modules, 6 CLI verbs, 7 exit code
 
 Ranked by how likely an interviewer is to notice. None is a correctness bug in the shipped behaviour.
 
-1. **README blockquote: "at-least-once invocation of an effect"** is true only for idempotent receivers. For a
+1. **[FIXED Nov 2: the blockquote now says at-least-once with a deduping receiver, at-most-once without.]** **README blockquote: "at-least-once invocation of an effect"** is true only for idempotent receivers. For a
    non-idempotent receiver, a crash after `CLAIMED` commits and before `fn()` is called (C3 at its very start)
    ends in zero invocations: the kernel refuses to resend. The README's own section B says it correctly
    ("the at-least-once vs at-most-once choice is made per tool"). **Say it before they do:** "precisely:
@@ -98,7 +101,7 @@ Ranked by how likely an interviewer is to notice. None is a correctness bug in t
    (connection refused, 503 before it accepted), the claim stays `CLAIMED`, the next attempt records
    `EFFECT_AMBIGUOUS action=fail`, and with notify's `skip` policy the workflow ends **SUCCEEDED, notify SKIPPED,
    no email** after using only 2 of 5 attempts. **Verified** with a probe. It is the safe direction (never a
-   duplicate) and the README's operator path covers it, but README A's line "Receiver dies → RetryableError
+   duplicate) and the README's operator path covers it. [FIXED Nov 2: README A now describes exactly this path.] Before that, README A's line "Receiver dies → RetryableError
    before the claim" describes a path the shipped notify tool cannot take (it always claims before calling).
    This is the most likely live change request: §5 drill 1 fixes it in about 20 lines.
 3. **With notify on `skip`, an ambiguous non-idempotent effect yields a SUCCEEDED workflow.** Documented (README B
@@ -133,7 +136,7 @@ and re-run the tests from a fresh extract. Recommended: do not.
 1. **"Walk me through what happens if the process dies while sending the email."** C3/C4: `CLAIMED` is on disk,
    notify is `RUNNING`. Resume: `ATTEMPT_INTERRUPTED`, back to `PENDING`, attempt 2 finds `CLAIMED`, writes
    `EFFECT_AMBIGUOUS`; idempotent receiver → resend with the same key, receiver dedupes; non-idempotent → fail the
-   step with `ambiguous_effect`, leave the row for an operator. Point at `engine._run_effect` lines 288-313.
+   step with `ambiguous_effect`, leave the row for an operator. Point at `engine._run_effect` lines 267-289.
 2. **"Why not exactly-once?"** Nothing local can close the window between "receiver accepted" and "my commit".
    Exactly-once effect = my stable key + a receiver that dedupes on it. I record the ambiguity instead of hiding it.
 3. **"Why does the key not include the attempt number?"** So every attempt and every restart presents the same key

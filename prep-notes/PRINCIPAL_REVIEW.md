@@ -1,5 +1,9 @@
 # Principal-engineer review of the Trase take-home (PRIVATE, not submitted)
 
+> Historical record. Its `file:line` anchors refer to the code as of the commit it names; the Nov 2
+> comment-trimming pass shifted line numbers (see `HUMANIZE_PASS.md`, and `CODE_WALKTHROUGH_FOR_GANESH.md`
+> for current anchors).
+
 Reviewed Oct 31 2026 against `~/claude-code-ws/trase-project` at `6a7e8c8` (the Oct 30 submission
 candidate), with the brief read line by line (`REQUIREMENTS_ONE_PAGER.md`). Verification before and
 after the pass: `pytest` on Python 3.14 and 3.9.6, `scripts/demo.sh` on both, a fresh `git archive`

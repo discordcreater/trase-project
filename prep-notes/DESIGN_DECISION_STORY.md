@@ -124,7 +124,7 @@ Outbox + dispatcher, TTL lease expiry, DAGs, YAML, hash-chained events, encrypti
 - **LOW, fixed:** non-dict input retried as "transient"; `cancel` printing a promise nobody keeps; stale `error` after success; `run` on a terminal workflow claiming and releasing; input/output key collision; `COMMIT` outside the `try`.
 - **Three taken with a variation, and why:** (#10) the reviewer suggested moving crash injection into a `Tool` wrapper; a tool wrapper cannot reach the between-steps crash point because the tool runs *before* its SUCCEEDED commit, so injection lives in `faults.py` at the two real boundaries (`CrashingSink` inside the receiver call, `CrashAfterCommit` as a `Store` subclass) and the engine has no crash hook at all. (#3) kept the registry model over persisting spec bodies, for the reason above. (#19) kept the name `idempotent` on `Tool` but fixed the contract ("the receivers of this tool's effects dedupe on the key"); renaming to `receiver_idempotent` would push a receiver concept into every pure tool.
 - **Docs (#13):** `DESIGN.md` read "like the minutes of a committee"; rewritten first-person as three shapes considered and one chosen.
-- Result: 23 tests on Python 3.14 and 3.9.6, demo clean on both, the take-over race re-run against the fix (27 tests after the Oct 31 review pass; see PRINCIPAL_REVIEW.md and walkthrough §9).
+- Result: 23 tests on Python 3.14 and 3.9.6, demo clean on both, the take-over race re-run against the fix (27 tests after the Oct 31 review pass, 31 after the evening pass; see PRINCIPAL_REVIEW.md and walkthrough §9).
 
 ---
 
