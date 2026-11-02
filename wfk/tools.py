@@ -1,15 +1,10 @@
-"""Tools: the only code that does work. Tools never touch the store.
+"""The tools that do the actual work. They never touch the store.
 
-A tool receives a ``StepContext`` (identity + two kernel services:
-``record_decision`` and ``run_effect``) and the merged inputs
-(workflow input + outputs of earlier steps), and returns a JSON-able dict.
+A tool gets a StepContext plus the workflow input merged with earlier steps'
+outputs, and returns a JSON-able dict.
 
-Error contract:
-  RetryableError  "try again"              -> retried up to max_attempts
-  FatalError      "this can never work"    -> step fails now
-  anything else   treated as retryable     (losing less work is the safe default)
-
-Fault-injection wrappers for tests and the demo live in ``faults.py``.
+RetryableError means try again, FatalError means fail the step now. Anything
+else is treated as retryable; I'd rather retry a bug a few times than drop work.
 """
 from __future__ import annotations
 
@@ -17,7 +12,7 @@ import json
 import os
 from typing import TYPE_CHECKING, Any, Dict, Optional, Protocol
 
-if TYPE_CHECKING:  # tools depend on the context's *interface* only
+if TYPE_CHECKING:
     from .engine import StepContext
 
 
@@ -31,30 +26,22 @@ class FatalError(Exception):
 
 class Tool(Protocol):
     name: str
-    # side_effect_free: True means the tool has no external effect and may be re-run on
-    # retry or resume without the ledger. The kernel enforces nothing from it today:
-    # run_effect is opt-in, and a tool that has an effect and skips the ledger is simply
-    # re-run. The flag is a declaration for readers and for the scheduler in the README's
-    # Design A, which may re-dispatch such a step without consulting the effects table.
+    # Declarative only for now: the kernel doesn't enforce it (run_effect is opt-in).
     side_effect_free: bool
-    # idempotent: True means the receivers of this tool's effects dedupe on the key the
-    # kernel passes them, so an ambiguous (CLAIMED, not DONE) effect may be re-called
-    # with the same key. It is a statement about the receiver, declared by the tool.
+    # The receiver dedupes on the key we pass, so an ambiguous effect can be resent.
     idempotent: bool
 
     def run(self, ctx: "StepContext", inputs: Dict[str, Any]) -> Dict[str, Any]: ...
 
 
 class Sink(Protocol):
-    """Receiver of the notify effect. ``send`` gets the idempotency key the kernel minted."""
-    idempotent: bool  # honours the key (SES, SendGrid, Stripe do; a bare SMTP relay does not)
+    """Receiver of the notify effect; ``send`` gets the kernel's idempotency key."""
+    idempotent: bool  # e.g. an API with an Idempotency-Key header; a bare SMTP relay isn't
 
     def send(self, key: str, payload: Dict[str, Any]) -> Dict[str, Any]: ...
 
 
-# --------------------------------------------------------------------------
-# Document triage tools
-# --------------------------------------------------------------------------
+# ---- document triage tools --------------------------------------------------
 
 class IngestTool:
     name, side_effect_free, idempotent = "ingest", True, True
@@ -97,17 +84,17 @@ class ClassifyTool:
                 best, hits, matched = label, len(found), "keyword:" + ",".join(found)
         confidence = round(min(0.5 + 0.15 * hits, 0.95), 2) if hits else 0.3
         decision = {"label": best, "confidence": confidence, "rule": matched}
-        ctx.record_decision("label", decision)  # auditable: why did this document get this label
+        ctx.record_decision("label", decision)
         return decision
 
 
 class NotifyTool:
-    """The only effectful step: one email per workflow, through the effects ledger."""
+    """One email per workflow, sent through the effects ledger."""
     name, side_effect_free = "notify", False
 
     def __init__(self, sink: Sink) -> None:
         self.sink = sink
-        self.idempotent = sink.idempotent  # the tool's only effect goes to this receiver
+        self.idempotent = sink.idempotent
 
     def run(self, ctx: "StepContext", inputs: Dict[str, Any]) -> Dict[str, Any]:
         label = inputs["classify"]["label"]
@@ -119,25 +106,20 @@ class NotifyTool:
 
 
 class FileNotifier:
-    """Demo receiver: appends one JSON line per *key* to a file, like a provider
-    that honours an Idempotency-Key. Writes through its own file handle, outside
-    the database, so the crash window between "accepted" and "DONE" is real.
-    The set of seen keys is read from the file once per process and kept in memory,
-    the way a provider keeps its dedupe index."""
+    """Demo receiver: one JSON line per key in a file, like a provider that honours an
+    Idempotency-Key. It lives outside the database on purpose, so the crash window
+    between "accepted" and "DONE" is real."""
 
     def __init__(self, path: str, idempotent: bool = True) -> None:
         self.path = path
         self.idempotent = idempotent
-        self.calls = 0  # invocations, including deduped ones; the tests compare it to lines written
+        self.calls = 0  # includes deduped calls
         self._seen: Optional[Dict[str, Dict[str, Any]]] = None
 
     def sent_keys(self) -> Dict[str, Dict[str, Any]]:
-        # The file is the receiver's truth and this dict is its cache, loaded on first use:
-        # a process that takes over after a crash reads the lines the dead one wrote, so
-        # the dedupe survives the restart. What it does not survive is two live processes
-        # appending to the same file: each would trust its own index. That is the
-        # receiver's problem by design (a real provider dedupes in its own database), and
-        # the kernel's owner fence is what keeps a second live process from getting here.
+        # Loaded from the file on first use, so a process that takes over after a crash
+        # sees what the dead one sent. Two live writers would each trust their own copy;
+        # the owner fence keeps that from happening.
         if self._seen is None:
             self._seen = {}
             if os.path.exists(self.path):
@@ -152,9 +134,7 @@ class FileNotifier:
         self.calls += 1
         if self.idempotent and key in self.sent_keys():
             return {"status": "duplicate", "key": key}
-        # idempotent=False models a receiver that ignores the key (a bare SMTP relay): every
-        # call is a delivery, so a resend here would be the duplicate the ledger exists to
-        # prevent, and the kernel must never make that call on its own.
+        # idempotent=False: ignores the key, every call is a delivery
         row = {"key": key, "payload": payload}
         with open(self.path, "a") as f:
             f.write(json.dumps(row, sort_keys=True) + "\n")

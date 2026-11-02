@@ -92,9 +92,9 @@ def test_done_effect_is_not_resent_on_resume(make_engine, notifications):
 
 
 def test_file_notifier_honours_the_key_only_when_it_says_it_does(notifications):
-    """The demo receiver's flag is behaviour, not a label: an idempotent receiver keeps the
-    first body for a key, a non-idempotent one delivers every call (which is why the kernel
-    never resends to it on its own)."""
+    """idempotent=True keeps the first body per key; idempotent=False delivers every call.
+    The kernel trusts this flag when deciding whether to resend after a crash, so it has
+    to mean what it says."""
     payload = {"to": "ap@example.com", "subject": "s", "body": "b"}
     honours = FileNotifier(notifications, idempotent=True)
     assert honours.send("k1", payload)["status"] == "sent"

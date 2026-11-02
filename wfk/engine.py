@@ -1,9 +1,8 @@
 """Orchestration: decides what runs next, never does the work itself.
 
-``Engine.run`` is a pure function of (database, registry): it holds no state
-between transitions, so a restart at any instruction resumes correctly.
-This module imports no concrete tool and no fault-injection code; the
-registry is assembled by the caller.
+The engine keeps nothing in memory between transitions, so a new process can
+pick up any workflow from the database alone. No concrete tools in here; the
+caller builds the registry.
 """
 from __future__ import annotations
 
@@ -30,19 +29,14 @@ class AmbiguousEffect(FatalError):
 
 
 def effect_key(workflow_id: str, step_name: str, effect_name: str) -> str:
-    # No attempt number: every attempt of the same logical effect shares one key,
-    # so the receiver can dedupe across retries and restarts.
-    # The key is also deliberately free of the spec version: a workflow migrated to a
-    # newer spec must keep presenting the same key for the same logical effect, or the
-    # receiver sees a new key and the duplicate the ledger exists to prevent goes out.
-    # Renaming a step is therefore a key change; a migration that renames one has to
-    # carry a key alias (old name -> new name) with it. A tenant id would go first.
+    # No attempt number and no spec version: retries, restarts and a spec migration
+    # all have to present the same key or the receiver can't dedupe. (So renaming a
+    # step changes the key; a migration that renames one needs an alias.)
     return hashlib.sha256(f"{workflow_id}:{step_name}:{effect_name}".encode()).hexdigest()
 
 
 class StepContext:
-    """What a tool is allowed to know (its identity) and do (two kernel services).
-    The store is never exposed; both services write under the engine's claim."""
+    """What a tool gets to see. No store access; both services write under the engine's claim."""
 
     def __init__(self, engine: "Engine", workflow_id: str, owner: str,
                  step: StepSpec, attempt: int, tool: Tool) -> None:
@@ -55,8 +49,7 @@ class StepContext:
                                         {"key": key, "data": data}, owner=self._owner)
 
     def run_effect(self, name: str, payload: Dict[str, Any], fn: EffectFn) -> Dict[str, Any]:
-        """Perform ``fn(key, payload)`` at most once per (workflow, step, name) as far as
-        the kernel can prove; see Engine._run_effect for the crash semantics."""
+        """Call ``fn(key, payload)`` through the effects ledger (see Engine._run_effect)."""
         return self._engine._run_effect(self.workflow_id, self._owner, self.step_name,
                                         self.attempt, self._tool, name, payload, fn)
 
@@ -90,9 +83,8 @@ class Engine:
         return wf_id
 
     def cancel(self, workflow_id: str, by: str = "cli") -> str:
-        """Cooperative cancel; returns the workflow state afterwards. Terminal refuses;
-        PENDING+unowned cancels now; otherwise a flag the owning engine honours
-        between attempts, never mid-tool."""
+        """Cooperative: an unowned PENDING workflow is cancelled right away, anything else
+        gets a flag the owning engine checks between attempts. Returns the state after."""
         wf = self.store.load_workflow(workflow_id)
         if wf.state in WF_TERMINAL:
             raise IllegalTransition(f"workflow {workflow_id} is {wf.state}; cannot cancel")
@@ -120,8 +112,8 @@ class Engine:
         except Exception:
             self.store.release(workflow_id, owner)  # an error is not a crash: free the claim
             raise
-        # A BaseException (KeyboardInterrupt, SystemExit, a simulated crash) is the process
-        # dying: it propagates without a release and leaves the stale owner a real crash leaves.
+        # BaseException (KeyboardInterrupt, SimulatedCrash) skips the release on purpose:
+        # that's the process dying, and a dead process leaves its claim behind.
         self.store.release(workflow_id, owner)
         return state
 
@@ -143,19 +135,14 @@ class Engine:
     def _run_owned(self, wf_id: str, owner: str, spec: WorkflowSpec) -> str:
         wf = self.store.load_workflow(wf_id)  # re-read under our claim
         if wf.state in WF_TERMINAL:
-            # A cancel landed between run()'s read and the claim: the row was PENDING and
-            # unowned, so the claim went through on a row that is already CANCELLED. There
-            # is nothing to run and nothing to finish; report it and let run() release.
+            # a cancel slipped in between run()'s first read and the claim
             return wf.state
         if wf.state == "PENDING":
             self.store.transition_workflow(wf_id, "PENDING", "RUNNING", owner, "started")
 
-        # Resume: a step found RUNNING was interrupted mid-attempt (at most one).
-        # Its attempt stays counted; next_run_at is left as-is (NULL after ATTEMPT_STARTED,
-        # so the retry is immediate). That is right here, where resume is an operator's
-        # `run --take-over`. With automatic lease expiry (README, A) an input that kills
-        # the worker would be redelivered at once, max_attempts times in a row; there the
-        # interrupted path should schedule a backoff like a failed attempt does.
+        # A step left RUNNING was interrupted mid-attempt. The attempt stays counted and
+        # it reruns immediately. Fine while resume is a manual --take-over; with automatic
+        # lease expiry this should back off like a failed attempt.
         for row in self.store.load_steps(wf_id):
             if row.state == "RUNNING":
                 self.store.transition_step(wf_id, row.name, "RUNNING", "PENDING", owner,
@@ -167,8 +154,7 @@ class Engine:
             if row.state in ("SUCCEEDED", "SKIPPED"):
                 continue  # output_json is persisted; never re-run
             if row.state == "FAILED":
-                # Only reachable after a crash between STEP_FAILED and the workflow's
-                # own FAILED commit: finish what the dead process started.
+                # crashed between STEP_FAILED and the workflow's FAILED commit
                 return self._finish(wf_id, owner, "FAILED", f"step {step.name} failed")
             outcome = self._run_step(wf_id, owner, step)
             if outcome in ("FAILED", "CANCELLED"):
@@ -195,18 +181,15 @@ class Engine:
             if self.store.cancel_requested(wf_id):
                 return "CANCELLED"
             if row.attempt >= row.max_attempts:
-                # Only an interrupted last attempt gets here (a retry is never scheduled
-                # without budget). No ATTEMPT_FAILED: the attempt was interrupted, not failed.
-                # This branch is also the poison-pill bound: an input that kills the process
-                # on every attempt is charged one attempt per crash (ATTEMPT_STARTED is
-                # committed before the tool runs), so it reaches the failure policy instead
-                # of being resumed forever.
+                # Only an interrupted last attempt lands here, so no ATTEMPT_FAILED.
+                # It's also what stops an input that crashes the process every time
+                # from being resumed forever: each crash costs one attempt.
                 error = f"attempt {row.attempt} of {row.max_attempts} was interrupted; no attempts left"
                 if row.error:
                     error += f" (error before it: {row.error})"
                 return self._give_up(wf_id, owner, step, row.state, row.attempt, "exhausted", error, [])
             if self._wait_until(row.next_run_at) and self.store.cancel_requested(wf_id):
-                return "CANCELLED"  # a cancel that arrived during the backoff is honoured before the attempt
+                return "CANCELLED"  # cancelled while we slept
 
             attempt = row.attempt + 1
             self.store.transition_step(wf_id, step.name, "PENDING", "RUNNING", owner,
@@ -214,23 +197,21 @@ class Engine:
                                        attempt_no=attempt, attempt=attempt, next_run_at=None)
             ctx = StepContext(self, wf_id, owner, step, attempt, tool)
             try:
-                output = tool.run(ctx, self._inputs(wf_id))  # the only place a tool runs; no transaction open
-                output_json = self._encode_output(output)      # a non-JSON output is a tool bug: fatal, not transient
+                output = tool.run(ctx, self._inputs(wf_id))  # no transaction open here
+                output_json = self._encode_output(output)
             except FatalError as e:
                 failed: EventSpec = ("ATTEMPT_FAILED", {"attempt": attempt, "error": str(e), "retryable": False})
                 reason = "ambiguous_effect" if isinstance(e, AmbiguousEffect) else "fatal"
                 return self._give_up(wf_id, owner, step, "RUNNING", attempt, reason, str(e), [failed])
             except StoreError:
-                raise  # the kernel's own failure inside ctx.* (e.g. a lost claim) is not the tool's
+                raise  # e.g. LostClaim from inside ctx.*: our problem, not the tool's
             except Exception as e:  # RetryableError and anything unexpected
                 retryable = attempt < row.max_attempts
                 failed = ("ATTEMPT_FAILED", {"attempt": attempt, "error": str(e), "retryable": retryable})
                 if not retryable:
                     return self._give_up(wf_id, owner, step, "RUNNING", attempt, "exhausted", str(e), [failed])
-                # Deterministic backoff, no jitter: the retry test asserts the exact delays
-                # and one process never contends with itself. A fleet retrying the same
-                # downstream outage would need jitter here (one line) or the retries
-                # synchronise into waves.
+                # No jitter: one process doesn't contend with itself, and the test checks
+                # exact delays. A fleet would need it.
                 delay = min(step.backoff_base_s * 2 ** (attempt - 1), self.BACKOFF_CAP_S)
                 next_run_at = to_iso(self.store.clock() + delay)
                 self.store.transition_step(
@@ -248,8 +229,8 @@ class Engine:
 
     @staticmethod
     def _encode_output(output: Any) -> str:
-        """A step output must be a JSON object: it is persisted and fed to later steps.
-        Anything else cannot be fixed by retrying, so it is a FatalError."""
+        """Outputs get persisted and fed to later steps, so they must be JSON objects.
+        Retrying won't fix a bad one, hence FatalError."""
         if not isinstance(output, dict):
             raise FatalError(f"tool returned {type(output).__name__}, not a JSON object")
         try:
@@ -259,7 +240,7 @@ class Engine:
 
     def _give_up(self, wf_id: str, owner: str, step: StepSpec, frm: str, attempt: int,
                  reason: str, error: str, events: List[EventSpec]) -> str:
-        """Step-level failure handling: on_failure decides FAILED (stops the workflow) or SKIPPED."""
+        """on_failure decides: FAILED (stops the workflow) or SKIPPED."""
         if step.on_failure == "skip":
             to, ev = "SKIPPED", ("STEP_SKIPPED", {"attempt": attempt, "error": error,
                                                  "reason": reason, "policy": "skip"})
@@ -273,10 +254,8 @@ class Engine:
         """Sleep until the persisted deadline. Returns True if it waited at all."""
         if not next_run_at:
             return False
-        # next_run_at is wall-clock time written by a possibly different process. If the
-        # clock stepped backwards between the write and this read (NTP, a VM restore), the
-        # remainder can be hours even though no scheduled delay ever exceeds BACKOFF_CAP_S.
-        # Clamping bounds the damage of a skewed clock to one maximum backoff.
+        # Wall-clock time, possibly written by another process. Clamp it so a clock that
+        # jumped backwards costs at most one max backoff instead of hours.
         remaining = min(from_iso(next_run_at) - self.store.clock(), self.BACKOFF_CAP_S)
         if remaining <= 0:
             return False
@@ -290,8 +269,8 @@ class Engine:
         key = effect_key(wf_id, step_name, name)
         row = self.store.get_effect(key)
         if row is not None and row.status == "DONE":
-            return row.result or {}  # already performed and recorded: never call fn again
-        if row is not None:  # CLAIMED, never DONE: the effect may or may not have happened
+            return row.result or {}  # done and recorded, don't call fn again
+        if row is not None:  # CLAIMED but not DONE: we don't know if it happened
             action = "resend" if tool.idempotent else "fail"
             self.store.append_event(wf_id, step_name, "EFFECT_AMBIGUOUS", attempt, {
                 "key": key, "claimed_by_attempt": row.attempt,
@@ -299,23 +278,18 @@ class Engine:
             if not tool.idempotent:
                 raise AmbiguousEffect(f"effect '{name}' claimed by attempt {row.attempt} but never "
                                       f"completed; receiver cannot dedupe; needs an operator")
-            # idempotent receiver: re-call with the SAME key, it dedupes
+            # idempotent receiver: same key again, it dedupes
         else:
-            # The ledger records that the effect was claimed, not what was sent: on a
-            # resend the payload is rebuilt from persisted step outputs, which is the same
-            # bytes as long as the tool is a pure function of its inputs (ours are). A
-            # receiver dedupes by key and keeps the first body, so the production version
-            # of this row carries a payload hash and the kernel refuses a resend whose
-            # payload differs, instead of letting a changed message vanish silently.
+            # TODO: store a payload hash and refuse a resend whose payload differs. Today a
+            # resend rebuilds the payload from stored outputs, which only matches because
+            # our tools are pure; the receiver would silently keep the first body.
             self.store.claim_effect(key, wf_id, step_name, name, attempt, owner=owner)
-        result = fn(key, payload)        # external call, outside any transaction
+        result = fn(key, payload)        # outside any transaction
         self.store.complete_effect(key, result, owner=owner, attempt=attempt)
         return result
 
 
-# --------------------------------------------------------------------------
-# Replay: fold the event log into a projection and compare with the tables.
-# --------------------------------------------------------------------------
+# ---- replay: fold the log into a projection, compare with the tables --------
 
 @dataclass
 class Projection:
@@ -331,8 +305,7 @@ def _move(obj: Dict[str, Any], frm: str, to: str, allowed: set, where: str) -> N
 
 
 def rebuild_state(events: Iterable[Event]) -> Projection:
-    """Pure reducer: the same ALLOWED sets as the store, applied to the log.
-    An illegal transition in the log is itself a finding (raises)."""
+    """Same ALLOWED sets as the store; an illegal transition in the log raises."""
     p = Projection()
     for e in events:
         t, pl, where = e.type, e.payload, f"event {e.seq} {e.type}"

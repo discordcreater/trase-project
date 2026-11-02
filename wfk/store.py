@@ -1,15 +1,9 @@
-"""Persistence: the only module that talks to SQLite.
+"""Persistence. The only module that talks to SQLite.
 
-Engine decides, Store remembers, Tool does.
-
-Every state change is one ``BEGIN IMMEDIATE`` transaction that updates the
-state table *and* appends the events that explain it, so the tables and the
-append-only log can never disagree (``engine.rebuild_state`` proves it).
-
-Every write that belongs to a workflow (transitions, the effects ledger, loose
-events) is fenced on the workflow's ``owner`` inside that transaction, so a
-process that lost its claim cannot write anything: not a state, not a ledger
-row, not an event.
+Each state change is one BEGIN IMMEDIATE transaction that updates the row and
+appends the events explaining it, so tables and log can't drift apart. Every
+workflow-scoped write also checks ``owner`` inside that transaction: a process
+that lost its claim can't write anything.
 """
 from __future__ import annotations
 
@@ -21,9 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
-# --------------------------------------------------------------------------
-# The state machines, in full. ``transition_*`` refuses anything not listed.
-# --------------------------------------------------------------------------
+# The state machines. transition_* refuses anything not listed here.
 WF_ALLOWED = {
     ("PENDING", "RUNNING"), ("PENDING", "CANCELLED"),
     ("RUNNING", "SUCCEEDED"), ("RUNNING", "FAILED"), ("RUNNING", "CANCELLED"),
@@ -183,24 +175,18 @@ class Event:
 EventSpec = Tuple[str, Dict[str, Any]]
 
 
-SCHEMA_VERSION = 1  # stamped in PRAGMA user_version; a newer file refuses an older kernel
+SCHEMA_VERSION = 1  # PRAGMA user_version
 
 
 class Store:
     def __init__(self, path: str, clock: Callable[[], float] = time.time) -> None:
         self.clock = clock
-        # One connection, one thread, one process: sqlite3 connections have thread affinity
-        # (check_same_thread stays on) and the engine holds no lock between transactions, so
-        # a second Store on the same file is a second process as far as the design is
-        # concerned; the owner fence, not this object, is what keeps two of them apart.
-        # synchronous=FULL is an fsync per commit (about a dozen per clean run): the cost of
-        # "durable before the next action" on one disk. The fleet version pays it once per
-        # batch in Postgres instead.
+        # One connection per Store, used from one thread. Two Stores on the same file are
+        # treated like two processes; the owner fence is what keeps them apart.
+        # synchronous=FULL means an fsync per commit, which is the price of durable-before-next-step.
         self.conn = sqlite3.connect(path, isolation_level=None)  # explicit BEGIN/COMMIT only
         self.conn.row_factory = sqlite3.Row
-        # Refuse before touching: the version is read before any DDL runs, so a file written
-        # by a newer kernel is handed back exactly as it was found (IF NOT EXISTS would make
-        # today's DDL harmless, but not the day a v2 renames a table or adds a column).
+        # Check the version before running any DDL, so a file from a newer kernel is left untouched.
         found = self.conn.execute("PRAGMA user_version").fetchone()[0]
         if found > SCHEMA_VERSION:
             self.conn.close()
@@ -208,7 +194,7 @@ class Store:
         self.conn.executescript(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;" + SCHEMA
         )
-        if found < SCHEMA_VERSION:  # fresh file (0); migrations would run here in order
+        if found < SCHEMA_VERSION:  # fresh file; migrations would go here
             self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def close(self) -> None:
@@ -219,14 +205,9 @@ class Store:
 
     @contextmanager
     def _tx(self) -> Iterator[None]:
-        """BEGIN IMMEDIATE takes the write lock up front, so what the block reads
-        (the owner fence included) is what the COMMIT is based on.
-
-        A DEFERRED transaction would read under a shared lock and upgrade on the
-        first write; under WAL that upgrade fails with SQLITE_BUSY whenever another
-        writer committed in between, and the fence would have been evaluated against
-        a snapshot that is already stale. Contention here is a wait on sqlite3's busy
-        timeout (5 s by default), then ``sqlite3.OperationalError`` (CLI exit 6)."""
+        """IMMEDIATE, not DEFERRED: take the write lock before reading, so the owner check
+        and the write see the same snapshot. Under contention sqlite3 waits its busy
+        timeout (5 s) and then raises OperationalError (CLI exit 6)."""
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             yield
@@ -236,13 +217,10 @@ class Store:
             raise
 
     def _fence(self, wf_id: str, owner: Optional[str]) -> None:
-        """Inside a transaction: the workflow must exist and be owned by ``owner``
-        (``None`` = unowned). Every write that belongs to a workflow passes here first.
+        """Inside a transaction: the workflow must be owned by ``owner`` (None = unowned).
 
-        The claim is checked at commit time, not at claim time, because the dangerous
-        process is the one that was alive and slow, not the one that died: it still
-        believes it owns the workflow. Nothing it does between transactions matters;
-        the first thing it tries to commit is refused and rolled back."""
+        Checked on every write rather than once at claim time, because the process to
+        worry about is the slow one that still thinks it owns the workflow."""
         r = self.conn.execute("SELECT owner FROM workflows WHERE id = ?", (wf_id,)).fetchone()
         if r is None:
             raise NotFound(f"workflow {wf_id} not found")
@@ -251,12 +229,8 @@ class Store:
 
     def _append(self, wf_id: str, step: Optional[str], attempt: Optional[int],
                 events: Sequence[EventSpec]) -> None:
-        """Append events; only ever called inside a transaction.
-
-        Every state change in the system funnels through this one INSERT, which makes
-        it the place for observability: a metrics counter per event type, a trace span
-        keyed by (workflow_id, attempt) and a change-data feed would all hang off here
-        after COMMIT, with no second instrumentation path to keep in sync."""
+        """Only called inside a transaction. Every state change goes through here, so this
+        is where metrics/tracing would hook in."""
         now = self.now()
         self.conn.executemany(
             "INSERT INTO events (workflow_id, step_name, type, attempt, payload_json, created_at)"
@@ -305,15 +279,12 @@ class Store:
         return [self._workflow(r) for r in rows]
 
     def claim(self, wf_id: str, owner: str, take_over: bool = False) -> None:
-        """Become the single live engine for this workflow (D9).
+        """Become the one engine running this workflow.
 
-        ``take_over`` is unconditional on purpose: the operator asserts the old owner
-        is dead, and if they are wrong the fence (not the claim) protects the data:
-        the old process cannot commit anything, though a side effect already in flight
-        inside its tool still lands, which is what the effects ledger is for. The
-        fleet version replaces the human assertion with a lease: ``lease_until`` for
-        expiry, and a ``lease_token`` that every write's WHERE clause carries, so
-        stealing is automatic and fenced instead of manual and fenced."""
+        ``take_over`` is unconditional: the operator is saying the old owner is dead. If
+        they're wrong, the fence still stops the old process from committing anything
+        (an effect already in flight still lands; that's what the ledger is for). With
+        more than one machine this becomes a lease with a token checked on every write."""
         with self._tx():
             if take_over:
                 cur = self.conn.execute("UPDATE workflows SET owner = ? WHERE id = ?", (owner, wf_id))
@@ -347,7 +318,7 @@ class Store:
             self._append(wf_id, None, None, [("WORKFLOW_STATE", {"from": frm, "to": to, "reason": reason})])
 
     def request_cancel(self, wf_id: str, by: str) -> None:
-        """Not fenced on purpose: anyone may ask; the owning engine honours the flag."""
+        """Not fenced: anyone may ask, the owning engine acts on it."""
         with self._tx():
             cur = self.conn.execute(
                 "UPDATE workflows SET cancel_requested = 1, updated_at = ? WHERE id = ?",
@@ -381,12 +352,8 @@ class Store:
     def transition_step(self, wf_id: str, name: str, frm: str, to: str, owner: Optional[str],
                         events: Sequence[EventSpec], attempt_no: Optional[int] = None,
                         **fields: Any) -> None:
-        """Move a step and append its events atomically.
-
-        Fenced on the workflow's owner and on the step's current state, so a
-        stale engine (lost claim) or a stale view of the row cannot commit;
-        ``LostClaim`` is raised and the transaction rolled back.
-        """
+        """Move a step and append its events in one transaction. Checks both the owner
+        and the step's current state; either mismatch raises LostClaim and rolls back."""
         if (frm, to) not in STEP_ALLOWED:
             raise IllegalTransition(f"step {name}: {frm} -> {to}")
         unknown = set(fields) - STEP_FIELDS
@@ -427,8 +394,7 @@ class Store:
 
     def complete_effect(self, key: str, result: Dict[str, Any], *, owner: Optional[str],
                         attempt: int) -> None:
-        """``attempt`` is the attempt that completed the effect; after a resume it is
-        not the one that claimed it, and the log says which."""
+        """``attempt`` is the one that completed it, which after a resume isn't the claimer."""
         with self._tx():
             row = self.get_effect(key)
             if row is None:
@@ -445,11 +411,11 @@ class Store:
             "SELECT * FROM effects WHERE workflow_id = ? ORDER BY created_at", (wf_id,)).fetchall()
         return [self._effect(r) for r in rows]
 
-    # ---- events (append-only: no UPDATE or DELETE exists in this module) ---
+    # ---- events (append-only: nothing in this module updates or deletes them) ---
 
     def append_event(self, wf_id: str, step: Optional[str], type: str, attempt: Optional[int],
                      payload: Dict[str, Any], *, owner: Optional[str]) -> None:
-        """An explanatory event outside a transition (DECISION, EFFECT_AMBIGUOUS); fenced too."""
+        """Event outside a transition (DECISION, EFFECT_AMBIGUOUS). Fenced like the rest."""
         with self._tx():
             self._fence(wf_id, owner)
             self._append(wf_id, step, attempt, [(type, payload)])

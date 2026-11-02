@@ -1,7 +1,6 @@
-"""Declarative workflow specs: code-defined dataclasses, optional JSON loader.
+"""Workflow specs as dataclasses, plus a small JSON loader.
 
-A spec version is immutable once published; ``workflows.spec_version`` pins a
-running workflow to the version it started with.
+Don't edit a published version; a running workflow stays on the version it started with.
 """
 from __future__ import annotations
 
@@ -17,7 +16,7 @@ class StepSpec:
     name: str
     tool: str                          # registry key
     max_attempts: int = 3
-    on_failure: str = "fail_workflow"  # or "skip": the workflow continues without this step
+    on_failure: str = "fail_workflow"  # or "skip"
     backoff_base_s: float = 0.05       # delay = min(base * 2**(attempt-1), Engine.BACKOFF_CAP_S)
 
     def __post_init__(self) -> None:

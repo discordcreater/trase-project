@@ -137,10 +137,10 @@ def test_backoff_wait_is_clamped_when_the_clock_steps_backwards(make_engine, not
 
 
 def test_interrupted_last_attempt_goes_to_the_failure_policy(make_engine, notifications):
-    """The edge the state machine grew during implementation (PENDING -> FAILED | SKIPPED):
-    the process dies inside classify's second and last attempt. Resume finds the step
-    RUNNING with no budget left, so it must fail it from PENDING without starting an
-    attempt it cannot afford, and must say the attempt was interrupted, not failed."""
+    """Dies inside classify's second (last) attempt. On resume there's no budget left, so the
+    step has to go PENDING -> FAILED without starting another attempt, and the error should
+    say it was interrupted rather than failed. This is why STEP_ALLOWED has PENDING -> FAILED;
+    I missed this case on paper."""
     from wfk.engine import consistency_diff
     from wfk.tools import RetryableError
 

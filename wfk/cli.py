@@ -1,7 +1,6 @@
 """CLI: python -m wfk [--db PATH] {start,run,status,cancel,replay,history} ...
 
-The registry (tool name -> Tool) is assembled here, including the
-fault-injection wrappers the demo and tests use.
+Builds the tool registry (with the fault-injection wrappers the demo uses).
 
 Exit codes: 0 ok; 1 replay found an inconsistency; 2 the workflow ended FAILED/CANCELLED;
 3 owned by another engine; 4 store refused (not found, exists, illegal, lost claim);
@@ -38,8 +37,8 @@ def build_registry(notifications: str, fail: Optional[str] = None,
 
 
 def _engine(a: argparse.Namespace, store: Store) -> Tuple[Engine, WorkflowSpec]:
-    """The engine plus the spec ``--spec`` names: a registered ``name@version`` or a JSON
-    file, which is registered for this process (``run`` needs the same flag later)."""
+    """--spec is either name@version or a JSON file. A file spec only exists for this
+    process, so ``run`` needs the same flag later."""
     specs = dict(SPECS)
     if a.spec and os.path.exists(a.spec):
         spec = load_spec_json(a.spec)
@@ -78,7 +77,7 @@ def _j(obj: object) -> str:
     return json.dumps(obj, sort_keys=True)
 
 
-# One narrator per event type, built once; p is the event payload.
+# how to print each event type; p is the payload
 _NARRATORS: Dict[str, Callable[[Dict], str]] = {
     "WORKFLOW_CREATED": lambda p: f"created {p['spec_name']}@{p['spec_version']}",
     "WORKFLOW_STATE": lambda p: f"{p['from']} -> {p['to']} ({p['reason']})",
@@ -132,11 +131,9 @@ def _run(engine: Engine, wf_id: str, take_over: bool) -> int:
     except SimulatedCrash as e:
         print(f"*** SIMULATED CRASH: {e} ***", file=sys.stderr)
         sys.stderr.flush()
-        # os._exit, not sys.exit: SystemExit would unwind through main()'s ``finally``
-        # and close the connection cleanly, and the demo would be rehearsing a graceful
-        # shutdown while claiming to show a crash. The stale owner left on disk is the
-        # evidence that nothing ran after the kill.
-        os._exit(1)  # like kill -9: no cleanup, no release of the claim
+        # os._exit, not sys.exit: SystemExit would run main()'s finally and close cleanly,
+        # which isn't a crash. Like kill -9: no cleanup, claim stays on disk.
+        os._exit(1)
     print(f"workflow {wf_id} finished: {state}")
     print_status(engine.store, engine.store.load_workflow(wf_id))
     return 0 if state == "SUCCEEDED" else 2
@@ -164,14 +161,14 @@ def cmd_cancel(a: argparse.Namespace, store: Store) -> int:
 
 
 def cmd_history(a: argparse.Namespace, store: Store) -> int:
-    store.load_workflow(a.id)  # an unknown id is an error (exit 4), not an empty history
+    store.load_workflow(a.id)  # unknown id: error, not an empty history
     for e in store.events(a.id, a.kind):
         print(json.dumps(e.__dict__, sort_keys=True) if a.json else narrate(e))
     return 0
 
 
 def cmd_replay(a: argparse.Namespace, store: Store) -> int:
-    """Read-only: fold the log, print the narrative, diff against the tables. Never runs a tool."""
+    """Read-only. Never runs a tool."""
     events = store.events(a.id)
     if not events:
         raise NotFound(f"workflow {a.id} has no events")
@@ -228,7 +225,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     crash_after = getattr(a, "crash_after", None)
     try:
         store = CrashAfterCommit(a.db, crash_after) if crash_after else Store(a.db)
-    except StoreError as e:  # a database file written by a newer kernel
+    except StoreError as e:  # e.g. db written by a newer version
         print(f"error: {e}", file=sys.stderr)
         return 4
     except sqlite3.Error as e:

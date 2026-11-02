@@ -17,7 +17,7 @@ wfk/
   cli.py      python -m wfk {start,run,status,cancel,history,replay}
 tests/        retry, failure policy, idempotency across a crash, restart safety, owner fencing, replay, transitions, CLI
 scripts/demo.sh   a run, a retry, two crash/resume scenarios, replay, cancel
-docs/DESIGN.md    the full design record (decisions, crash-point table, test plan)
+docs/DESIGN.md    design notes (decisions, crash-point table, test plan)
 ```
 
 ## How to run
@@ -180,11 +180,11 @@ own file handle, outside the database, so the crash window is real; `CrashingSin
 receiver accepted and before `DONE` commits (the worst case), and the tests check that exactly one
 line exists after resume, in both the idempotent and the non-idempotent variants.
 
-> The kernel guarantees **at-least-once invocation** of an effect, **exactly-once recording** of its
-> outcome, and **exactly-once effect iff the receiver honours the idempotency key** the kernel passes
-> it. When a crash makes the outcome of a non-idempotent effect unknowable, the kernel records
-> `EFFECT_AMBIGUOUS`, fails the step with that reason, and stops: it never guesses and never forks a
-> new execution around it.
+> With a receiver that honours the idempotency key, the kernel guarantees **at-least-once invocation**
+> of an effect, **exactly-once recording** of its outcome, and so an **exactly-once effect**. With a
+> receiver that cannot dedupe, invocation is **at-most-once**: when a crash makes the outcome
+> unknowable, the kernel records `EFFECT_AMBIGUOUS`, fails the step with that reason, and stops; it
+> never guesses and never forks a new execution around it.
 
 Crash points for the notify step and what resume does at each are tabulated in
 `docs/DESIGN.md` §5.2 (C0–C7); the tests cover C2/C3–C4 (`test_notify_effect_once_across_crash`,
@@ -234,8 +234,10 @@ keyed by `tool@version`. Timeouts map to `RetryableError`, validation 4xx to `Fa
 
 **Failure boundaries.** Worker dies → lease expires → task redelivered → the `ATTEMPT_INTERRUPTED`
 path, fenced by the token. Tool service dies → typed error → retry policy, ledger untouched.
-Receiver dies → `RetryableError` before the claim, or ambiguity after it; the ledger makes the
-difference visible. One shard's database down → that shard pauses, others unaffected. Queue loss →
+Receiver dies → notify has already claimed before it calls, so the next attempt finds `CLAIMED`:
+an idempotent receiver gets the same key again; a non-idempotent one is treated as ambiguous, and with
+notify on `skip` the workflow ends `SUCCEEDED`, notify `SKIPPED` after 2 of its 5 attempts, no email
+(the safe direction; letting the receiver report "definitely not sent" would release the claim). One shard's database down → that shard pauses, others unaffected. Queue loss →
 tasks are re-derived from `steps` (`PENDING`, `next_run_at <= now`, no owner): the queue is an
 accelerator, never the source of truth. Stuck `CLAIMED` rows are listed by a periodic reconciler for
 operators; the `events` append is partitioned by (shard, month) with an index on `(workflow_id, seq)`.

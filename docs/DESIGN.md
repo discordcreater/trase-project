@@ -1,10 +1,5 @@
 # Design Decision Record: `wfk`, a durable workflow kernel
 
-Status: FINAL (written 2026-10-30, before the code; amended after a self-review pass the same day, summarized in the README time log).
-Audience: me, now (it is what I built from) and anyone reviewing the code (every sentence here should be explainable from the code alone).
-
----
-
 ## 0. Problem framing
 
 The brief asks for a minimal, production-minded engine that runs a four-step "document triage" workflow (Ingest, Extract, Classify, Notify) with:
@@ -22,7 +17,7 @@ The brief asks for a minimal, production-minded engine that runs a four-step "do
 2. **Explainability.** One mental model: **Engine decides, Store remembers, Tool does.** Nothing else holds state.
 3. **Scope discipline.** Four tables, six modules, six CLI verbs, 31 tests in seven files. Everything else is a sentence in the README.
 
-The hard problem is the window between an external side effect returning and the local commit that records it. No single-process design can close it. I sketched three shapes before choosing: (a) a transactional outbox with a dispatcher that owns all sends, (b) a dedupe-only sink with no kernel bookkeeping, (c) an effects ledger in the kernel with the receiver deduping on a kernel-minted key. The honest guarantee any of them can give is: *at-least-once invocation, exactly-once recording, exactly-once effect iff the receiver honours the idempotency key; when the kernel cannot tell whether the effect happened, it surfaces the ambiguity instead of guessing.* I chose (c) because it makes that ambiguity a first-class, queryable fact rather than hiding it inside a dispatcher (a) or a sink (b).
+The hard problem is the window between an external side effect returning and the local commit that records it. No single-process design can close it. I sketched three shapes before choosing: (a) a transactional outbox with a dispatcher that owns all sends, (b) a dedupe-only sink with no kernel bookkeeping, (c) an effects ledger in the kernel with the receiver deduping on a kernel-minted key. The honest guarantee any of them can give is: *with a receiver that honours the idempotency key, at-least-once invocation, exactly-once recording and so exactly-once effect; without one, at-most-once invocation; when the kernel cannot tell whether the effect happened, it surfaces the ambiguity instead of guessing.* I chose (c) because it makes that ambiguity a first-class, queryable fact rather than hiding it inside a dispatcher (a) or a sink (b).
 
 ---
 
@@ -176,7 +171,7 @@ STEP_ALLOWED = {
 }
 ```
 
-Implementation note (2026-10-30): the two `PENDING → FAILED | SKIPPED` edges were added for one
+Implementation note: the two `PENDING → FAILED | SKIPPED` edges were added for one
 case I missed on paper: a step interrupted on its *last* attempt. Resume moves it `RUNNING → PENDING`
 (attempt already counted), and the loop then finds `attempt >= max_attempts` while the row is
 `PENDING`; the failure policy must be applied from there without starting an attempt it has no
@@ -303,7 +298,7 @@ C3 and C4 are indistinguishable from disk, which is exactly why the ledger recor
 
 ### 5.3 Stated guarantee (goes verbatim into the README)
 
-> The kernel guarantees **at-least-once invocation** of an effect, **exactly-once recording** of its outcome, and **exactly-once effect iff the receiver honours the idempotency key** the kernel passes it. When a crash makes the outcome of a non-idempotent effect unknowable, the kernel records `EFFECT_AMBIGUOUS`, fails the step with that reason, and stops: it never guesses and never forks a new execution around it.
+> With a receiver that honours the idempotency key, the kernel guarantees **at-least-once invocation** of an effect, **exactly-once recording** of its outcome, and so an **exactly-once effect**. With a receiver that cannot dedupe, invocation is **at-most-once**: when a crash makes the outcome unknowable, the kernel records `EFFECT_AMBIGUOUS`, fails the step with that reason, and stops; it never guesses and never forks a new execution around it.
 
 ---
 

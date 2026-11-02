@@ -1,10 +1,7 @@
-"""Fault injection for tests and the demo. Nothing in here is imported by the kernel.
+"""Fault injection for tests and the demo. The kernel never imports this.
 
-Crashes are injected at the boundary where they happen in real life:
-  - inside a tool / receiver call   (``CrashingSink``: the receiver accepted, then we die)
-  - right after a commit             (``CrashAfterCommit``: a Store that dies after a given
-                                      step's SUCCEEDED commit, i.e. between two steps)
-The engine knows nothing about any of this.
+Crashes happen where they would in real life: inside the receiver call
+(CrashingSink) or right after a commit (CrashAfterCommit), not via hooks in the engine.
 """
 from __future__ import annotations
 
@@ -18,8 +15,7 @@ if TYPE_CHECKING:
 
 
 class SimulatedCrash(BaseException):
-    """Stands in for kill -9. Deliberately not an Exception so no handler swallows it;
-    the engine lets it propagate without releasing its claim, like a dead process."""
+    """Stands in for kill -9. A BaseException so no `except Exception` swallows it."""
 
 
 class _Wrapper:
@@ -53,7 +49,7 @@ class Counting(_Wrapper):
 
 
 class CrashingSink:
-    """Worst case: the receiver accepted, then the process dies before DONE commits."""
+    """The receiver accepts, then we die before DONE commits. The worst case."""
 
     def __init__(self, inner: Sink) -> None:
         self.inner = inner
@@ -65,8 +61,8 @@ class CrashingSink:
 
 
 class CrashAfterCommit(Store):
-    """A Store that dies right after ``step``'s SUCCEEDED commit: the crash point
-    *between* two steps, which no tool wrapper can reach."""
+    """Dies right after ``step``'s SUCCEEDED commit, i.e. between two steps, which a
+    tool wrapper can't reach."""
 
     def __init__(self, path: str, step: str, **kw: Any) -> None:
         super().__init__(path, **kw)
