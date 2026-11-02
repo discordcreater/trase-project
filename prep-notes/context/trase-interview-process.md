@@ -1,0 +1,62 @@
+# Trase.ai (Red Cell Partners) — Platform / Origin (agent OS) — Master tracking file
+
+**Role:** Senior/Staff Software Engineer, Platform and Execution Model ([posting](https://job-boards.greenhouse.io/trase/jobs/5255658007), applied Oct 22 via Greenhouse). 🏠 **Remote (USA)** (Bay Area fine; Seattle area preferred, McLean VA office). **Recruiter:** Adam Elconin, Red Cell Partners (adamelconin@redcellpartners.com; LinkedIn since Jun 2015). Tier: T2 (live recruiter-engaged loop, low TC).
+
+## You are here
+- **Oct 30 3:18 PM:** take-home ARRIVED (early; 48-hour window, due **Sun Nov 1 ~3:18 PM PT**). **Oct 31 ~3:40 AM: principal-review pass DONE (4 fixes + 4 tests, 27 tests, inline notes at the key decisions, README roadmap), zip REBUILT and verified; Ganesh reviews and submits manually** (see the Take-home section below). Then: discussion call on the take-home, 3 technical 1:1s, 2 non-technicals, hiring manager.
+- Oct 28 11:30 AM: exploratory recruiter chat done (7/10). [Call notes](https://github.com/discordcreater/job-search-2026/blob/main/interviews/call-notes/2026-10-28-red-cell-trase-adam-elconin-recruiter-call-notes.md) · [Intelligence](https://github.com/discordcreater/job-search-2026/blob/main/interviews/intelligence/2026-10-28-trase-adam-elconin-intel.md) · [Postmortem](https://github.com/discordcreater/job-search-2026/blob/main/interviews/trase-postmortem.md).
+
+## Take-home (Durable Workflow Kernel + Architecture Deep Dive) — status Oct 31 2026 ~3:40 AM: REVIEW PASS DONE, ZIP REBUILT; STILL GANESH TO SUBMIT
+- **Brief:** "Technical Take-Home (3-5 hours): Durable Workflow Kernel + Architecture Deep Dive"; four-step document triage (ingest, extract, classify, notify), state machine, retries, step-level failure handling, persistence, safe resume, no duplicate notify, audit history, CLI (start/status/cancel/replay), tests, README with design sections A-D. AI tools explicitly allowed for the take-home (NOT for the live round). Confidential: never post the brief or the solution publicly. Local copy of the brief only: `~/claude-code-ws/trase-takehome/_private/brief.{pdf,txt}` (not in any repo). Email thread: https://mail.google.com/mail/?authuser=g.muthuluru365@gmail.com#all/thread-f:1880514856249731757
+- **Due:** Sun Nov 1 2026 ~3:18 PM PT (48 h from the 3:18 PM Oct 30 email). **Submission:** zip named `ganesh_muthuluru_trase.zip` uploaded by **Ganesh himself** at https://app7.greenhouse.io/tests/29313ccafbdfb3b9ea1b3089eb43c1ac (🛑 agents never open that link or submit; rule of Oct 30).
+- **Solution `wfk`:** Python stdlib + SQLite, ~1,350 lines, 27 tests (pass on Python 3.9 and 3.14), demo script, README with design sections A-D, DESIGN.md. Guarantee as written: at-least-once invocation, exactly-once recording, exactly-once effect iff the receiver honours the idempotency key.
+- **Code (canonical working copy and the source of the zip):** https://github.com/discordcreater/trase-project (PRIVATE, re-verified Oct 31; 14 commits by Ganesh Muthuluru, plain conventional messages; HEAD `b51a529`) = local `~/claude-code-ws/trase-project`. Any code/README/DESIGN change happens there; rebuild the zip with `cd ~/claude-code-ws/trase-project && git archive --format=zip -o ~/claude-code-ws/trase-takehome/dist/ganesh_muthuluru_trase.zip HEAD`.
+- **Zip:** `~/claude-code-ws/trase-takehome/dist/ganesh_muthuluru_trase.zip` (29 entries: wfk/, tests/, scripts/demo.sh, examples/doc.json, README.md, docs/DESIGN.md, requirements.txt, pyproject.toml, .gitignore; no venv, no .db, no private docs). Verified Oct 31 after the review pass (HEAD `b51a529`): extracted into an empty dir, 27 tests pass on Python 3.9.6, demo exit 0, no AI mention, no stale scale wording.
+- **Private prep docs** (never in the zip): `~/claude-code-ws/trase-takehome/docs/` and copied to [`interviews/trase-takehome/`](https://github.com/discordcreater/job-search-2026/tree/main/interviews/trase-takehome) in this repo: [principal review](https://github.com/discordcreater/job-search-2026/blob/main/interviews/trase-takehome/PRINCIPAL_REVIEW.md) (Oct 31: verdict 8.7/10 principal-level, gaps G1-G4 fixed, 16 inline notes listed, one decision for Ganesh on the time log), [requirements one-pager](https://github.com/discordcreater/job-search-2026/blob/main/interviews/trase-takehome/REQUIREMENTS_ONE_PAGER.md), [code walkthrough](https://github.com/discordcreater/job-search-2026/blob/main/interviews/trase-takehome/CODE_WALKTHROUGH_FOR_GANESH.md) (§9 = what changed in the review pass and how to talk about it; anchors updated to `b51a529`), [completeness audit](https://github.com/discordcreater/job-search-2026/blob/main/interviews/trase-takehome/COMPLETENESS_AUDIT.md) (verdict COMPLETE), [study guide](https://github.com/discordcreater/job-search-2026/blob/main/interviews/trase-takehome/STUDY_GUIDE_FOR_GANESH.md), [presentation](https://github.com/discordcreater/job-search-2026/blob/main/interviews/trase-takehome/PRESENTATION.md), [interview prep](https://github.com/discordcreater/job-search-2026/blob/main/interviews/trase-takehome/INTERVIEW_PREP.md), [design debate](https://github.com/discordcreater/job-search-2026/blob/main/interviews/trase-takehome/DESIGN_DEBATE.md), [review response](https://github.com/discordcreater/job-search-2026/blob/main/interviews/trase-takehome/REVIEW_RESPONSE.md), [design decision story + interview commentary](https://github.com/discordcreater/job-search-2026/blob/main/interviews/trase-takehome/DESIGN_DECISION_STORY.md) (how the design was chosen: three lenses, the debate, each decision's tradeoff, what to say).
+- **Ganesh's steps (also in PRIORITY_ACTIONS):** (0) decide the one open question in PRINCIPAL_REVIEW.md §6 (keep the honest ~7.25 h time log, recommended, or fold the review-pass row into the self-review row; if changed, edit README.md in `~/claude-code-ws/trase-project`, commit, push, rebuild the zip with the `git archive` line above); (1) read README.md + docs/DESIGN.md in `~/claude-code-ws/trase-project`, skim `wfk/engine.py`; (2) run `cd ~/claude-code-ws/trase-project && ~/claude-code-ws/trase-takehome/.venv/bin/python -m pytest -q && scripts/demo.sh`; (3) open the Greenhouse link above, upload `~/claude-code-ws/trase-takehome/dist/ganesh_muthuluru_trase.zip`, submit before Sun Nov 1 3:00 PM PT; (4) tell the agent "Trase submitted" so it logs the submission, replies to Adam if the thread calls for it, and starts the live-round drills (INTERVIEW_PREP §5) with the study guide.
+- **For later rounds:** every agent reads both repos (trase-project code + these docs) before building any Trase report, prep doc or presentation; the discussion round tests ownership of every decision and "how AI was used" (answer in INTERVIEW_PREP §2).
+
+## Process (as stated by Adam)
+1. Take-home (PDF + zip upload; no hard timer; Adam monitors loosely; can be sent earlier if asked).
+2. Follow-up discussion of the take-home: decisions, how AI was used, a new requirement.
+3. Three 1:1 technicals (system design, technical deep dives; one engineer each).
+4. Two 30-minute cross-functional non-technicals.
+5. Hiring manager.
+- Candidates may be redirected to another role mid-loop. Interviews are "practical; not something you study for".
+
+## Take-home plan
+- **Receive Fri Nov 6.** Block a quiet 4–6 hour window over Sat Nov 7 to Sun Nov 8 (do not stack with Apple/Atlassian prep). Ask Adam for the PDF early if Apple/Atlassian are quiet.
+- **Use AI coding deliberately and show it:** break the task component by component, tie it together yourself, keep a short DECISIONS.md (design choices, trade-offs, what the AI wrote, what you changed and why, failure modes, what you would do next). The follow-up call tests **ownership of every decision**.
+- Expect orchestration-flavored work (long-lived workflows, state, retries, idempotency, governance/audit hooks). Lean on your Agentforce workflow-execution runtime and the Cisco platform for the vocabulary, not the code.
+- **Do not** mention other processes, Salesforce internals, or comp.
+
+## Comp and negotiation dossier (live-sourced from Adam; Carta peer data from Adam)
+- **Posted:** $180–240K base. **Staff $220–240K; senior $200–210K; senior staff (L7) about $240K to $260–270K; principal rare.** Bonus 10% (senior/staff), 15% (senior staff/principal). Equity weak (Red Cell holds a large stake): senior about 50th pct, staff about 35th pct of $100–200M-raised peers; base about 90th pct.
+- **Location:** benchmarked to Seattle/DC (95–96% of Bay Area); no Bay Area uplift before next year (after the next raise). Adam said negotiate anyway.
+- **Risk-adjusted TC (cash + bonus; equity not sized):** Staff about $242–264K; **Senior Staff about $276–310K**. Bear/base/bull on equity: bear $0 (illiquid, heavy Red Cell stake), base small, bull a meaningful early-company grant if the next raise re-marks it. **Floor $550K target is not reachable here**; value as a fallback and a lever.
+- **Negotiation playbook:** (1) fight for **Senior Staff (L7)**, because only that unlocks > $240K base; make the case with architecture/roadmap evidence; (2) ask for a **sign-on bonus** and **15% bonus target** in lieu of Bay Area uplift; (3) ask for a **refresh/early-review clause** tied to the next raise (Adam said the benchmark will be revisited); (4) equity: ask the grant size, strike/preferred price, last 409A or round price, and the vesting; (5) never name a base first (Ganesh already said "280–300"; do not repeat or raise it in writing).
+- **Never say:** the Salesforce stock story, that Agentforce adoption is limited, "I'm looking because compensation fell", any other process or number, the India plan.
+
+## 🚀 Private-company equity snapshot (Oct 26 rule)
+- **Funding:** pre-seed **$10.5M** (2025, on emerging from stealth, [Technical.ly](https://technical.ly/entrepreneurship/agentic-ai-startup-trase-raises-10m/)); **$107M seed** led by **ARCH Venture Partners** with Red Cell participating ([Pulse 2.0](https://pulse2.com/trase-raises-107-million-seed-round-led-by-arch-venture-partners/)); **valuation undisclosed**; Adam: "raising more money very soon".
+- **How the grant is priced:** unknown. Options strike at the 409A, not the seed price; the next round is the upside. Ask: current 409A, last preferred price, share count, vesting.
+- **ARR/profitability/burn:** not disclosed. **Headcount:** about 10 to about 70 people (Adam), engineering about 45, platform about 15; web sources said about 55 earlier in the year.
+- **Space and tailwind:** agent governance/OS for regulated industries (healthcare, government); strong tailwind, crowded field (Anthropic/OpenAI platforms, enterprise agent stacks).
+- **Health verdict:** funded and growing fast, backed by a venture studio; **equity risk: medium** (illiquid, heavy insider ownership, uncertain valuation). **Negotiation lever:** the pending raise and the Bay Area benchmark review "next year".
+
+## People
+- **Adam Elconin** (Red Cell recruiter; first convo; advocate). Lindsay (director of engineering), Cameron (head of people), "Grant" (CEO of Red Cell and Trase), Joe (founder, now Red Cell Federal); ex-Salesforce engineers at Trase: Constantine/"Steve Const.", Alex (verify on LinkedIn before any reference).
+
+## Communication log
+1. May 18 2024 (LinkedIn): Ganesh asks Adam for roles after the Cisco layoff; Adam: freelancing, will pass roles along.
+2. Jan 8 2025 (LinkedIn): Adam joins Red Cell, invites Ganesh to look at roles.
+3. Aug 10 2026 (LinkedIn): Ganesh writes; Adam points to Trase and a Greenhouse role (7 loops running).
+4. Oct 21 2026 (LinkedIn): Ganesh follows up; Oct 22 Adam sends the Platform/OS role + levels note + Zoom invite.
+5. Oct 22 2026: Ganesh applies on Greenhouse (Platform and Execution Model, 5255658007) and accepts the invite.
+6. **Oct 28 2026, 11:30 AM:** recruiter chat (7/10). Ingested the same day.
+7. Oct 30 3:18 PM: Adam emails the take-home (early). Oct 30 evening: solution complete; Ganesh to submit by Sun Nov 1.
+
+
+## Ganesh's read and plan (Oct 29 2026)
+- Likes it: similar to the Sumo Logic opportunity; **fully remote**; total comp somewhat lower (decent base, lighter equity) but not far off; hiring process straightforward.
+- Take-home: Ganesh asked Adam to send it for the **weekend of Nov 7-8** (not Oct 31-Nov 1). Agent asks Ganesh Thu Nov 5 for the OK, then sends Adam a one-line reminder Fri Nov 6 morning unless the project already arrived (OPEN_LOOPS L052).
