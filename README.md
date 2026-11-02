@@ -32,16 +32,16 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # pytest on
 .venv/bin/python -m pytest                                             # 31 tests, about a second
 scripts/demo.sh                                                        # everything below, in a temp dir
 
-python -m wfk start examples/doc.json --id w1     # create and run; database is ./wfk.db
-python -m wfk status w1
-python -m wfk history w1 --kind DECISION          # what classify decided, and on which rule
-python -m wfk replay w1                           # rebuild state from the log, diff against the tables
-python -m wfk cancel w1                           # cooperative; honoured between attempts
-python -m wfk run w1 [--take-over]                # resume after a crash
-python -m wfk start doc.json --spec my_spec.json  # a JSON spec; pass the same --spec to run later
+python3 -m wfk start examples/doc.json --id w1     # create and run; database is ./wfk.db
+python3 -m wfk status w1
+python3 -m wfk history w1 --kind DECISION          # what classify decided, and on which rule
+python3 -m wfk replay w1                           # rebuild state from the log, diff against the tables
+python3 -m wfk cancel w1                           # cooperative; honoured between attempts
+python3 -m wfk run w1 [--take-over]                # resume after a crash
+python3 -m wfk start doc.json --spec my_spec.json  # a JSON spec; pass the same --spec to run later
 ```
 
-`python -m wfk` needs no install; run it from the repository root. The venv is only
+`python3 -m wfk` needs no install; run it from the repository root. The venv is only
 for pytest. It runs on the system Python 3.9 as well as 3.14.
 
 `start` and `run` take three fault flags for the demo and for poking at it by hand:
