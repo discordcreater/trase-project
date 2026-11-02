@@ -1,6 +1,6 @@
 # START HERE: Trase live-round prep (private; none of this is in the submission zip)
 
-**What you submit:** only the zip `~/claude-code-ws/trase-takehome/dist/ganesh_muthuluru_trase.zip` (24 files: README.md, docs/DESIGN.md, examples/, pyproject.toml, requirements.txt, scripts/demo.sh, tests/, wfk/). It is built by `git archive` from this repo; `.gitattributes` marks `prep-notes/` and itself `export-ignore`, so nothing in this folder can ever enter the zip. Never zip the repo folder by hand.
+**What you submit:** only the zip (a committed copy is at `prep-notes/submission/ganesh_muthuluru_trase.zip`) `~/claude-code-ws/trase-takehome/dist/ganesh_muthuluru_trase.zip` (24 files: README.md, docs/DESIGN.md, examples/, pyproject.toml, requirements.txt, scripts/demo.sh, tests/, wfk/). It is built by `git archive` from this repo; `.gitattributes` marks `prep-notes/` and itself `export-ignore`, so nothing in this folder can ever enter the zip. Never zip the repo folder by hand.
 
 ## Read in this order (minimum 70 min; all links are in this repo)
 1. [LIVE_ROUND_READINESS.md](https://github.com/discordcreater/trase-project/blob/main/prep-notes/LIVE_ROUND_READINESS.md): running notes (§7), likely questions (§4), live change drills (§5), debug drills (§6). 30 min.
