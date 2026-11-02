@@ -14,6 +14,50 @@ The whole system in one sentence you can say in your sleep:
 
 ---
 
+## Decision map (added Nov 2 2026, after the README/DESIGN prose rewrite)
+
+`docs/DESIGN.md` no longer has a numbered decisions table (D1-D15) or numbered sections; it is
+plain prose with named headings. The prep docs in this folder still cite the old numbers. Use
+this table to find the matching text. The crash-point ids C0-C7 are unchanged.
+
+| Old id | New `docs/DESIGN.md` heading (or README section) |
+|---|---|
+| D1 (package layout, stdlib, pytest) | "Shape of the solution" |
+| D2 (tables + events in one transaction, reducer) | "Data model" (second paragraph) and "History and replay" |
+| D3 (state machine, ALLOWED sets, SKIPPED) | "State machines" |
+| D4 (retry policy: unexpected exceptions retry, FatalError fails now) | "Retries and the failure policy" |
+| D5 (`on_failure: fail_workflow \| skip`) | "Retries and the failure policy" (last paragraph) |
+| D6 (effects ledger, key without attempt) | "Side effects and the ledger" |
+| D7 (CLAIMED-not-DONE: `EFFECT_AMBIGUOUS`, resend or fail per tool) | "Side effects and the ledger" (the pseudocode, the crash table rows C3/C4, the guarantee paragraph) |
+| D8 (resume by persisted outputs, `ATTEMPT_INTERRUPTED`) | "Resume and durability" |
+| D9 (claim + owner fence, no TTL lease) | "Ownership: the claim and the fence" |
+| D10 (`replay` is read-only) | "History and replay" |
+| D11 (decisions are events, `history --kind`) | "History and replay" and the event-type table under "Data model" |
+| D12 (code-defined spec, small JSON loader) | "Interfaces" (paragraph after the listing) |
+| D13 (cooperative cancel) | "Interfaces" (the cancellation paragraph) |
+| D14 (Python 3.9 compatible) | "Shape of the solution" (last paragraph) |
+| D15 (what was cut) | "What I left out" |
+| §0 Problem framing | "The problem" |
+| §1 Decisions table | gone; this map |
+| §2 Data model, event types | "Data model" |
+| §3 State machine, implementation note | "State machines" |
+| §4 Execution and retry algorithm | "One run, start to finish" and "Retries and the failure policy" |
+| §5.1 / §5.2 / §5.3 | "Side effects and the ledger": mechanism, crash-point table, guarantee paragraph |
+| §6 Durability and resume (incl. the claim) | "Ownership: the claim and the fence" and "Resume and durability" |
+| §7 Audit history and replay | "History and replay" |
+| §8 Interfaces | "Interfaces" |
+| §9 Module layout, line counts | "Shape of the solution" (no line counts any more) |
+| §10 Test plan | "Tests" (DESIGN) and "Tests" (README, per file) |
+| §11-§14 Sections A-D | README "Design": "Scaling and system evolution", "Failure semantics: a crash during the notify side effect", "Abstractions and versioning", "Multi-tenancy and compliance" |
+| §15 Explicitly cut | "What I left out" (DESIGN) and the last paragraph of README "Time log" |
+
+README changes in the same rewrite: the test map table became per-file paragraphs under "Tests";
+"Production roadmap" became "What I would do next, in order"; the time log is a list (about 7 h in
+total, stated in the first sentence); the SES/SendGrid example is gone (only Stripe's
+`Idempotency-Key` is named); "Design" subsections keep the A-D content under plain headings.
+
+---
+
 ## 0. Numbers to have cold
 
 | Thing | Value |
@@ -424,7 +468,7 @@ Rule that makes all of them safe: **the engine holds nothing in memory that is n
 before the next action**, and every transition is fenced on `(owner, current state)`. So a new
 process can always read the rows and continue, and a zombie of the old process can never commit.
 
-### 4.1 The notify step (DESIGN §5.2, C0–C7)
+### 4.1 The notify step (DESIGN "Side effects and the ledger", crash-point table C0–C7)
 
 | Crash | On disk | Resume does | Duplicate? |
 |---|---|---|---|

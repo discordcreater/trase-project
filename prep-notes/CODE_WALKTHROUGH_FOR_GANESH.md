@@ -1637,7 +1637,7 @@ stay PENDING 0/n forever, visible in `status`. `test_retry_then_success` asserts
 
 Rules for that answer: never apologetic, never "the AI did X"; speak in "I decided", "I rejected",
 "I reviewed"; name two specific things you changed in review (the fence on the ledger, the two
-extra edges; both are documented in `docs/DESIGN.md` §3 and D9); then pivot to the live drill.
+extra edges; both are documented in `docs/DESIGN.md` under "State machines" and "Ownership: the claim and the fence"); then pivot to the live drill.
 
 **Pitfalls in the room:** don't claim exactly-once (say the guarantee precisely); don't call
 `replay` a re-execution; don't say the lease is "missing" (say it was a deliberate trade and name

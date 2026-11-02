@@ -42,6 +42,10 @@ stripped) is identical, and the 31 tests pass from a fresh `git archive` extract
 
 ## README/DESIGN tells (for the prose-rewrite pass)
 
+Addressed Nov 2 2026 by the full rewrite of README.md and docs/DESIGN.md (plain headings, no D-numbers,
+no line counts, no self-review meta; see the decision map at the top of STUDY_GUIDE_FOR_GANESH.md). The list
+below is kept as the record of what was found.
+
 Quoted as they stand after this pass. Line numbers are approximate.
 
 ### README.md

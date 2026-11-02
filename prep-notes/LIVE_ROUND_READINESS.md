@@ -114,9 +114,9 @@ Ranked by how likely an interviewer is to notice. None is a correctness bug in t
 5. **Time log totals about 7 h** (1.5 + 1.5 + 0.75 + 0.75 + 0.5 + 2) against a 3-5 h brief, with no total line.
    Honest, and the 2 h row is clearly labelled as self-review and hardening. Expect "you spent seven hours?"
    Answer in §7.
-6. **`docs/DESIGN.md` D15** lists `schema_version` among the cuts and says "4-hour codebase", while the code stamps
-   `PRAGMA user_version` (the README cut list says "`schema_version` in outputs", which is the intended meaning).
-   Cosmetic.
+6. (Fixed Nov 2 in the prose rewrite: DESIGN "What I left out" now says "a `schema_version` field inside step
+   outputs (the database file itself does carry `user_version`)"; the "4-hour codebase" phrase and the D-numbers
+   are gone. See the decision map at the top of STUDY_GUIDE_FOR_GANESH.md.)
 7. Private-only, not in the zip: `PRIORITY_ACTIONS.md` item 1 and `COMPLETENESS_AUDIT.md` still say "23 tests";
    the real number is 31. `~/claude-code-ws/trase-takehome` has uncommitted edits and a different git history
    from `trase-project`; irrelevant to the zip (built from `trase-project`), but use `trase-project` as the
